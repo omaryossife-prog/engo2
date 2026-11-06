@@ -1,0 +1,15 @@
+PyQt6>=6.6
+PyMuPDF>=1.24
+Pillow>=10.0
+keyring>=25.0
+pytesseract>=0.3.10
+SpeechRecognition>=3.10
+google-genai>=1.0.0
+sounddevice>=0.5.0
+Markdown>=3.6
+matplotlib>=3.8
+python-docx>=1.1.2
+python-pptx>=1.0.2
+pywin32>=306; platform_system == "Windows"
+
+lxml>=5.0

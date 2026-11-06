@@ -1,0 +1,90 @@
+name: Build Engo Setup
+
+on:
+  workflow_dispatch:   # manual "Run workflow" button in the Actions tab
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**/*.md'
+      - 'tools/**'
+
+# A newer push cancels the older build of the same branch (saves runner minutes).
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast gate (~20 s, Linux): fail early on syntax errors in ANY split module
+  # before spending an hour on the native Windows build.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Syntax-check main.py and every engo_*.py
+        run: |
+          python -m py_compile main.py engo_*.py
+          grep -Eq '^APP_VERSION\s*=\s*["'"'"'][0-9]+\.[0-9]+\.[0-9]+' main.py
+          ls engo_*.py
+
+  build:
+    needs: check
+    runs-on: windows-latest
+    timeout-minutes: 240
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
+
+      - name: Install NSIS
+        run: choco install nsis -y --no-progress
+
+      - name: Install Python build dependencies
+        run: |
+          python -m pip install --disable-pip-version-check --upgrade pip wheel
+          python -m pip install --disable-pip-version-check -r requirements-build.txt
+
+      # Reuse Nuitka's generated C/objects between runs. Each engo_*.py is its
+      # own C file, so after a normal commit only the modules that changed are
+      # recompiled; the unchanged ones (and third-party modules) come from cache.
+      - name: Restore Nuitka build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            build\nuitka
+            ~\AppData\Local\Nuitka
+          key: nuitka-${{ runner.os }}-py313-${{ hashFiles('requirements.txt', 'requirements-build.txt', 'build_release.ps1') }}-${{ github.sha }}
+          restore-keys: |
+            nuitka-${{ runner.os }}-py313-${{ hashFiles('requirements.txt', 'requirements-build.txt', 'build_release.ps1') }}-
+
+      - name: Build with build_release.ps1 (parallel Nuitka, all runner cores)
+        shell: pwsh
+        run: |
+          Write-Host "Logical processors: $env:NUMBER_OF_PROCESSORS"
+          .\build_release.ps1 -BuildMode FULL -SkipOptionalPyAudio -NuitkaJobs ([int]$env:NUMBER_OF_PROCESSORS)
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Engo_Setup
+          path: dist\Engo_Setup_v*.exe
+          if-no-files-found: error
+
+      - name: Upload build logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Engo_Build_Logs
+          path: build_logs\
+          if-no-files-found: ignore
