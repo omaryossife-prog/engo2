@@ -1,0 +1,17 @@
+UI changes and fixes
+
+Previous UI update:
+- Responsive all-pages gallery, image popup, double-Space chat shortcut.
+- Escape cancellation of PDF pointer selections.
+
+Current regression correction:
+- Full-page gallery recalculates the size hints of existing page items on resize, fits at least 6 columns on desktop widths, adds columns on wider screens (up to 12), and uses taller proportional icons so page previews occupy more of each tile.
+- Removed unnecessary DocumentCanvas focus changes and restored original Select marquee behavior. Escape still cancels active selection, but a separate saved selection snapshot is used only to restore the state when cancelling.
+- Preserves the same page-relative PDF reading position during both chat opening and chat closing, including the final full-width relayout.
+
+Build settings remain unchanged:
+- GitHub Actions explicitly requests 2 Nuitka compiler jobs.
+- MSVC remains forced for Python 3.13.
+- --low-memory remains an optional manual fallback only and is not used by the standard workflow.
+
+Validation: Python syntax compilation and ZIP integrity passed. The GUI was not run on Windows in this environment.

@@ -155,6 +155,7 @@ class DocumentCanvas(QWidget):
         self._marquee_additive = False
         self._marquee_page = -1
         self._marquee_previous = []
+        self._marquee_restore_selection = []
         self.ai_focus = None  # (page_index, normalized box [x,y,w,h], label, semantic kind)
         # Match the known-good 15.28.25 behavior: focus is visible unless the learner turns it off.
         self.ai_focus_visible = True
@@ -1284,6 +1285,79 @@ class DocumentCanvas(QWidget):
         self._text_selection_text = ""
         self._text_selection_records = []
         self.update()
+
+    def has_active_pointer_selection(self) -> bool:
+        """Whether Escape should cancel an in-progress PDF selection/drag."""
+        return bool(
+            self._drawing
+            or self._marquee_active
+            or self._text_selecting
+            or self._dragging_annotation
+            or self._text_selection_display_rects
+        )
+
+    def cancel_active_pointer_selection(self) -> bool:
+        """Cancel the current mouse selection without changing the active tool."""
+        if not self.has_active_pointer_selection():
+            return False
+
+        # Native text selection can be used for asking about text or translating it.
+        if self._text_selecting or self._text_selection_display_rects:
+            self._clear_text_selection()
+
+        # AI region, translation region, highlight, tag, link, shape, and pen
+        # previews all share _drawing. Dropping this state ensures the later
+        # mouse release cannot commit the rectangle or stroke.
+        if self._drawing:
+            self._drawing = False
+            self._draw_page = -1
+            self._draw_start = QPointF()
+            self._draw_current = QPointF()
+            self._draw_points = []
+
+        # Restore the annotations that were selected before a marquee began.
+        if self._marquee_active:
+            # Keep marquee commit behavior identical to the original Select tool,
+            # but restore the pre-drag selection when Escape cancels the gesture.
+            previous = list(self._marquee_restore_selection or [])
+            self._marquee_active = False
+            self._marquee_page = -1
+            self._marquee_previous = []
+            self._marquee_restore_selection = []
+            self._marquee_additive = False
+            self._marquee_start = QPointF()
+            self._marquee_current = QPointF()
+            if previous:
+                self.tab.set_annotation_selection(previous)
+            else:
+                self.tab.clear_annotation_selection()
+
+        # A selected annotation can also be dragged/resized/rotated with a live
+        # preview. Escape discards that preview; it never commits the transform.
+        if self._dragging_annotation:
+            self._dragging_annotation = False
+            self._drag_page = -1
+            self._drag_xref = 0
+            self._drag_kind = "move"
+            self._drag_handle = ""
+            self._drag_moved = False
+            self._drag_rotation_delta = 0.0
+            self._drag_rotation_step = 1.0
+            self._drag_aspect_ratio = 0.0
+            self._drag_control_mode = ""
+            self._drag_control_meta = {}
+            self._drag_control_preview_pos = QPointF()
+            self._drag_control_geometry = None
+            self._drag_target_page = -1
+            self._drag_target_display_rect = QRectF()
+            self._drag_group_items = []
+            self._drag_group_delta = QPointF()
+            self._drag_original_rect = QRectF()
+            self._drag_preview_rect = QRectF()
+
+        self.setCursor(self._tool_default_cursor())
+        self.update()
+        return True
 
     def _begin_text_selection(self, index: int, page_rect: QRectF, word_entry):
         self._clear_text_selection()
@@ -2830,7 +2904,9 @@ class DocumentCanvas(QWidget):
                 self._marquee_current = QPointF(pos)
                 self._marquee_page = int(index)
                 self._marquee_additive = bool(event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
-                self._marquee_previous = list(getattr(self.tab, "selected_annotations", []) or []) if self._marquee_additive else []
+                current_selection = list(getattr(self.tab, "selected_annotations", []) or [])
+                self._marquee_previous = current_selection if self._marquee_additive else []
+                self._marquee_restore_selection = current_selection
                 if not self._marquee_additive:
                     self.tab.clear_annotation_selection()
                 self.setCursor(Qt.CursorShape.CrossCursor)
@@ -2851,7 +2927,9 @@ class DocumentCanvas(QWidget):
             self._marquee_current = QPointF(pos)
             self._marquee_page = -1
             self._marquee_additive = bool(event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
-            self._marquee_previous = list(getattr(self.tab, "selected_annotations", []) or []) if self._marquee_additive else []
+            current_selection = list(getattr(self.tab, "selected_annotations", []) or [])
+            self._marquee_previous = current_selection if self._marquee_additive else []
+            self._marquee_restore_selection = current_selection
             if not self._marquee_additive:
                 self.tab.clear_annotation_selection()
             self.setCursor(Qt.CursorShape.CrossCursor)
@@ -3054,7 +3132,7 @@ class DocumentCanvas(QWidget):
             end_point = QPointF(self._marquee_current)
             marquee = QRectF(start_point, end_point).normalized()
             contained_mode = end_point.x() >= start_point.x()
-            chosen = list(self._marquee_previous)
+            chosen = list(self._marquee_previous) if self._marquee_additive else []
             if marquee.width() >= 3.0 or marquee.height() >= 3.0:
                 for page_index, visible_page_rect in list(self.page_rects.items()):
                     if not marquee.intersects(visible_page_rect):
@@ -3073,6 +3151,7 @@ class DocumentCanvas(QWidget):
             self._marquee_active = False
             self._marquee_page = -1
             self._marquee_previous = []
+            self._marquee_restore_selection = []
             self.tab.set_annotation_selection(chosen)
             self.setCursor(Qt.CursorShape.ArrowCursor)
             self.update()
@@ -3364,8 +3443,64 @@ class DocumentCanvas(QWidget):
 
 
 class PageOverviewGrid(QListWidget):
-    """Full-screen page gallery with deterministic keyboard navigation."""
+    """Full-screen page gallery with responsive columns and deterministic navigation."""
     keyActionRequested = pyqtSignal(str)
+    metricsChanged = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._last_responsive_metrics = None
+        self._updating_responsive_metrics = False
+
+    def update_responsive_metrics(self):
+        """Fit six or more page tiles across desktop screens without stale item sizes."""
+        if self._updating_responsive_metrics:
+            return
+
+        viewport_width = max(1, int(self.viewport().width()))
+        # QListWidget's viewport is already smaller than the outer window. Reserve
+        # the gallery's 5px inner padding on each side and account for inter-item
+        # spacing before dividing the width. This prevents a nominal sixth column
+        # from falling just outside the viewport (the previous 5-column symptom).
+        spacing = max(0, int(self.spacing()))
+        usable_width = max(1, viewport_width - 12)
+        if usable_width >= 1180:
+            columns = max(6, min(12, usable_width // 250))
+        else:
+            columns = max(1, min(5, usable_width // 230))
+        columns = min(columns, max(1, (usable_width + spacing) // 150))
+        tile_width = max(140, (usable_width - spacing * (columns - 1)) // columns)
+
+        # The former 270px icon-height limit made portrait pages look narrow even
+        # when each column had 240px available. Give the icon enough height to use
+        # its natural portrait ratio; QIcon keeps the PDF image aspect ratio intact.
+        icon_width = max(112, tile_width - 20)
+        icon_height = max(180, int(round(icon_width * 1.50)))
+        tile_height = icon_height + 48
+        metrics = (tile_width, tile_height, icon_width, icon_height)
+        if metrics == self._last_responsive_metrics:
+            return
+
+        self._last_responsive_metrics = metrics
+        self._updating_responsive_metrics = True
+        try:
+            cell_size = QSize(tile_width, tile_height)
+            self.setGridSize(cell_size)
+            self.setIconSize(QSize(icon_width, icon_height))
+            # QListWidgetItem.setSizeHint() overrides QListView.setGridSize().
+            # Update every existing item whenever the window/viewport is resized.
+            for index in range(self.count()):
+                item = self.item(index)
+                if item is not None:
+                    item.setSizeHint(QSize(cell_size))
+            self.doItemsLayout()
+        finally:
+            self._updating_responsive_metrics = False
+        self.metricsChanged.emit()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_responsive_metrics()
 
     def keyPressEvent(self, event):
         key_actions = {
@@ -3892,11 +4027,12 @@ class DocumentTab(QWidget):
         self.page_overview_grid.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.page_overview_grid.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._page_overview_overlay.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        # Larger, tightly packed page tiles. The selected outline is applied to
-        # the complete QListWidget item (preview + caption), not just the image.
-        self.page_overview_grid.setIconSize(QSize(244, 270))
+        # The grid computes tile/icon dimensions from the full available width.
+        # At desktop widths this gives six or more columns rather than leaving
+        # a large unused strip on the right side of the gallery.
         self.page_overview_grid.setItemAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
-        self.page_overview_grid.setGridSize(QSize(270, 316))
+        self.page_overview_grid.update_responsive_metrics()
+        self.page_overview_grid.metricsChanged.connect(self._on_page_overview_metrics_changed)
         self.page_overview_grid.setSpacing(1)
         self.page_overview_grid.setWordWrap(True)
         self.page_overview_grid.setTextElideMode(Qt.TextElideMode.ElideNone)
@@ -3926,6 +4062,22 @@ class DocumentTab(QWidget):
         self.page_overview_grid.installEventFilter(self)
         self.page_overview_grid.viewport().installEventFilter(self)
         self._page_overview_app_filter_installed = False
+
+    def _on_page_overview_metrics_changed(self):
+        """Discard visible previews rendered for the previous tile size and reload them lazily."""
+        if not getattr(self, "_page_overview_active", False):
+            return
+        grid = self.page_overview_grid
+        viewport_rect = grid.viewport().rect()
+        for index in range(grid.count()):
+            item = grid.item(index)
+            if item is None or not bool(item.data(Qt.ItemDataRole.UserRole + 1)):
+                continue
+            if grid.visualItemRect(item).intersects(viewport_rect):
+                page_index = item.data(Qt.ItemDataRole.UserRole)
+                item.setIcon(self._page_overview_placeholder_icon(int(page_index)))
+                item.setData(Qt.ItemDataRole.UserRole + 1, False)
+        self._schedule_page_overview_preview_refresh()
 
     def _handle_page_overview_key(self, action_name: str):
         """Handle page-gallery navigation using the visible geometry of the grid."""
@@ -4152,6 +4304,7 @@ class DocumentTab(QWidget):
         if self._page_overview_active or not self.doc or getattr(self.doc, "is_closed", False):
             return
         grid = self.page_overview_grid
+        grid.update_responsive_metrics()
         grid.setUpdatesEnabled(False)
         grid.clear()
         try:
@@ -4167,7 +4320,7 @@ class DocumentTab(QWidget):
                     f"Double-click to open page {page_index + 1}",
                     f"اضغط مرتين لفتح الصفحة {page_index + 1}"
                 ))
-                item.setSizeHint(QSize(270, 316))
+                item.setSizeHint(grid.gridSize())
                 grid.addItem(item)
         finally:
             grid.setUpdatesEnabled(True)
@@ -4500,6 +4653,7 @@ class DocumentTab(QWidget):
             width = self._secondary_scroll.viewport().width()
             height = self._secondary_scroll.viewport().height()
             self._secondary_canvas.set_viewport_size(width, height)
+            self.restore_chat_viewport_anchors()
             # Annotation geometry helpers on DocumentTab use its canonical canvas.
             # Keep that invisible canvas at the same scale/layout as this visible pane.
             if self._linked_view_secondary is not None:
@@ -4728,6 +4882,72 @@ class DocumentTab(QWidget):
                 return
             timer.start(max(0, int(delay_ms)))
 
+    @staticmethod
+    def _capture_vertical_scroll_anchor(scroll_area, canvas, viewport_fraction: float = 0.42):
+        """Capture a page-relative reading point so horizontal resizing cannot jump the PDF vertically."""
+        if scroll_area is None or canvas is None:
+            return None
+        try:
+            bar = scroll_area.verticalScrollBar()
+            viewport_height = max(1, int(scroll_area.viewport().height()))
+            fraction = max(0.10, min(0.90, float(viewport_fraction)))
+            document_y = float(bar.value()) + viewport_height * fraction
+            rects = getattr(canvas, "page_rects", {}) or {}
+            if not rects:
+                return {"fallback_ratio": (bar.value() / max(1, bar.maximum())),
+                        "viewport_fraction": fraction}
+            page_index, page_rect = min(
+                rects.items(),
+                key=lambda pair: (0.0 if pair[1].top() <= document_y <= pair[1].bottom()
+                                  else min(abs(document_y - pair[1].top()), abs(document_y - pair[1].bottom())))
+            )
+            page_height = max(1.0, float(page_rect.height()))
+            page_fraction = max(0.0, min(1.0, (document_y - float(page_rect.top())) / page_height))
+            return {"page_index": int(page_index), "page_fraction": page_fraction,
+                    "viewport_fraction": fraction}
+        except (RuntimeError, AttributeError, TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _restore_vertical_scroll_anchor(scroll_area, canvas, anchor):
+        if scroll_area is None or canvas is None or not anchor:
+            return
+        try:
+            bar = scroll_area.verticalScrollBar()
+            viewport_height = max(1, int(scroll_area.viewport().height()))
+            page_index = anchor.get("page_index")
+            rect = (getattr(canvas, "page_rects", {}) or {}).get(int(page_index)) if page_index is not None else None
+            if rect is not None:
+                document_y = float(rect.top()) + max(0.0, min(1.0, float(anchor.get("page_fraction", 0.0)))) * float(rect.height())
+                target = document_y - viewport_height * max(0.10, min(0.90, float(anchor.get("viewport_fraction", 0.42))))
+            else:
+                ratio = max(0.0, min(1.0, float(anchor.get("fallback_ratio", 0.0))))
+                target = ratio * bar.maximum()
+            bar.setValue(max(bar.minimum(), min(bar.maximum(), int(round(target)))))
+        except (RuntimeError, AttributeError, TypeError, ValueError):
+            pass
+
+    def begin_chat_viewport_anchor_preservation(self):
+        """Keep the same PDF reading point visible while the chat panel changes canvas width."""
+        anchors = []
+        primary = self._capture_vertical_scroll_anchor(self.scroll, self.canvas)
+        if primary is not None:
+            anchors.append((self.scroll, self.canvas, primary))
+        if self._secondary_scroll is not None and self._secondary_canvas is not None:
+            secondary = self._capture_vertical_scroll_anchor(self._secondary_scroll, self._secondary_canvas)
+            if secondary is not None:
+                anchors.append((self._secondary_scroll, self._secondary_canvas, secondary))
+        self._chat_open_viewport_anchors = anchors
+        self.restore_chat_viewport_anchors()
+
+    def restore_chat_viewport_anchors(self):
+        for scroll_area, canvas, anchor in list(getattr(self, "_chat_open_viewport_anchors", []) or []):
+            self._restore_vertical_scroll_anchor(scroll_area, canvas, anchor)
+
+    def end_chat_viewport_anchor_preservation(self):
+        self.restore_chat_viewport_anchors()
+        self._chat_open_viewport_anchors = []
+
     def _relayout(self):
         if getattr(self, "_document_closing", False):
             return
@@ -4741,8 +4961,10 @@ class DocumentTab(QWidget):
         if not hasattr(self, "scroll"):
             return
         self.canvas.set_viewport_size(self.scroll.viewport().width(), self.scroll.viewport().height())
+        self.restore_chat_viewport_anchors()
         self.canvas.update()
         self._relayout_linked_secondary()
+        self.restore_chat_viewport_anchors()
 
     def scroll_continuously(self, angle_delta: int = 0, pixel_delta: int = 0) -> bool:
         """Scroll the complete multi-page PDF vertically; never turn pages with the wheel here."""

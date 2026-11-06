@@ -1,0 +1,77 @@
+ENGO BUILD FIX - KEEP TWO-JOB PARALLEL BUILD
+===========================================
+
+What the two supplied logs actually show
+----------------------------------------
+1. Local PC: Python 3.13 was paired with Nuitka's downloaded MinGW64 compiler.
+   Nuitka stopped with: "non-MSVC is not currently supported with Python 3.13".
+   Fix: force MSVC with --msvc=latest.
+
+2. GitHub Actions: the workflow already passed -NuitkaJobs 2. The GitHub log
+   confirms "Logical processors: 2" and the builder confirms "--jobs=2".
+   At 188m 6s, MSVC failed compiling module.google.genai.types.c (131,067th
+   generated C line) with C1002: compiler is out of heap space in pass 2.
+   The workflow then kept hanging on leftover compiler processes until the
+   hosted-job cancellation at about 237 minutes. A PowerShell Runspace error
+   appeared during cancellation because of the old Ctrl+C callback.
+
+Important parallel-build decision
+---------------------------------
+- The normal GitHub workflow in THIS package explicitly uses --jobs=2.
+- --low-memory is NOT enabled in the normal workflow. Nuitka documents that
+  --low-memory implies --jobs=1, which would violate the requested 2-job build.
+- The optional PowerShell switch -LowMemory is retained only as a manual
+  emergency fallback if the two-job build still hits C1002. Use it only when
+  choosing to trade parallelism for lower memory pressure.
+- MSVC is forced with --msvc=latest; --lto=no remains enabled.
+- Fatal MSVC/SCons errors are detected early so orphaned processes are stopped.
+- The GitHub build timeout is 360 minutes and the cache key is updated for the
+  MSVC two-job configuration.
+
+Update the EXISTING GitHub repository
+-------------------------------------
+Do NOT run git init again. Do NOT run git remote add origin again.
+Your original commands already created the repository and remote.
+
+1. Extract this ZIP to a temporary folder.
+2. Copy/replace these files into your existing local repository folder:
+   - build_release.ps1
+   - .github\workflows\build.yml
+   - BUILD_SETUP_RECOVERY.bat
+   - BUILD_FAILURE_FIX_GUIDE.txt
+3. Open PowerShell in your existing project folder (the folder containing .git).
+4. Run these commands:
+
+   git status
+   git add build_release.ps1 .github/workflows/build.yml BUILD_SETUP_RECOVERY.bat BUILD_FAILURE_FIX_GUIDE.txt
+   git commit -m "Fix MSVC selection and preserve two-job parallel build"
+   git push origin main
+
+5. Because the workflow listens for pushes to main, the push starts a build.
+   To start it manually instead: GitHub repository > Actions > Build Engo Setup
+   > Run workflow > Run workflow.
+
+Local build on the developer PC
+-------------------------------
+1. Install Visual Studio Build Tools 2022 or newer:
+   https://visualstudio.microsoft.com/visual-cpp-build-tools/
+2. In Visual Studio Installer, choose "Desktop development with C++" and make
+   sure the MSVC x64/x86 build tools and a Windows 10/11 SDK are installed.
+3. Extract the corrected ZIP or replace the same four files in the local project.
+4. Run BUILD_SETUP_RECOVERY.bat once. It cleans old Nuitka intermediates and
+   builds using MSVC. Locally, the default parallelism is the detected physical
+   core count; GitHub is explicitly capped at two compiler jobs.
+
+What is and is not fixed
+------------------------
+- The local Python 3.13 / MinGW incompatibility is addressed by forcing MSVC.
+- The GitHub workflow remains parallel on exactly two Nuitka compiler jobs.
+- The timeout/cancellation handling is improved.
+- The recorded GitHub C1002 is a genuine compiler-memory failure in the very
+  large google.genai.types.c translation unit. Keeping two jobs does not prove
+  that C1002 is eliminated; the new run will tell us whether the updated process
+  handling and MSVC setup are enough. If C1002 repeats, the true memory-saving
+  fallback is -LowMemory, which necessarily runs one compiler job, or a runner
+  with more RAM. Do not claim that both --low-memory and --jobs=2 can be active.
+
+No successful Windows EXE build is claimed from this Linux inspection environment.

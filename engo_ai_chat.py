@@ -203,6 +203,127 @@ class AIChatMessageBrowser(QTextBrowser):
         menu.deleteLater()
 
 
+class ClickableChatImageLabel(QLabel):
+    """Image thumbnail that opens its saved original in a dedicated preview window."""
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class ChatImagePreviewDialog(QDialog):
+    """Resizable, zoomable popup for images attached to chat messages."""
+
+    def __init__(self, image_path: str, title: str = "Attached image", parent=None):
+        super().__init__(parent, Qt.WindowType.Window)
+        self.image_path = os.path.abspath(str(image_path or ""))
+        self._source_pixmap = QPixmap(self.image_path)
+        self._zoom_factor = 1.0
+        self.setWindowTitle(str(title or "Attached image"))
+        self.setModal(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setMinimumSize(420, 300)
+        self.setSizeGripEnabled(True)
+
+        screen = QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else QRect(0, 0, 1200, 850)
+        start_width = min(980, max(520, int(available.width() * 0.72)))
+        start_height = min(820, max(420, int(available.height() * 0.78)))
+        self.resize(start_width, start_height)
+        self.move(available.center() - self.rect().center())
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+        toolbar = QHBoxLayout()
+        self.file_label = QLabel(os.path.basename(self.image_path) or "Attached image")
+        self.file_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.file_label.setMinimumWidth(0)
+        self.file_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        toolbar.addWidget(self.file_label, 1)
+
+        self.zoom_out_btn = QToolButton(self)
+        self.zoom_out_btn.setText("−")
+        self.zoom_out_btn.setFixedSize(32, 30)
+        self.zoom_out_btn.setToolTip("Zoom out")
+        self.zoom_out_btn.clicked.connect(lambda: self._change_zoom(1 / 1.2))
+        toolbar.addWidget(self.zoom_out_btn)
+        self.zoom_label = QLabel("Fit")
+        self.zoom_label.setMinimumWidth(48)
+        self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        toolbar.addWidget(self.zoom_label)
+        self.zoom_in_btn = QToolButton(self)
+        self.zoom_in_btn.setText("+")
+        self.zoom_in_btn.setFixedSize(32, 30)
+        self.zoom_in_btn.setToolTip("Zoom in")
+        self.zoom_in_btn.clicked.connect(lambda: self._change_zoom(1.2))
+        toolbar.addWidget(self.zoom_in_btn)
+        self.fit_btn = QToolButton(self)
+        self.fit_btn.setText("Fit")
+        self.fit_btn.setToolTip("Fit image to window")
+        self.fit_btn.clicked.connect(self._reset_zoom)
+        toolbar.addWidget(self.fit_btn)
+        self.close_btn = QToolButton(self)
+        self.close_btn.setText("×")
+        self.close_btn.setFixedSize(32, 30)
+        self.close_btn.setToolTip("Close image preview")
+        self.close_btn.clicked.connect(self.close)
+        toolbar.addWidget(self.close_btn)
+        root.addLayout(toolbar)
+
+        self.image_scroll = QScrollArea(self)
+        self.image_scroll.setWidgetResizable(False)
+        self.image_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_scroll.setFrameShape(QFrame.Shape.StyledPanel)
+        self.image_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.image_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.image_scroll.setStyleSheet("QScrollArea { background: #171b22; border: 1px solid #394456; border-radius: 6px; }")
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_label.setStyleSheet("QLabel { background: #171b22; border: 0; }")
+        if self._source_pixmap.isNull():
+            self.image_label.setText("Image file is no longer available.")
+            self.image_label.setMinimumSize(260, 180)
+        self.image_scroll.setWidget(self.image_label)
+        root.addWidget(self.image_scroll, 1)
+        QTimer.singleShot(0, self._render_image)
+
+    def _change_zoom(self, factor: float):
+        self._zoom_factor = max(0.20, min(5.0, self._zoom_factor * float(factor)))
+        self._render_image()
+
+    def _reset_zoom(self):
+        self._zoom_factor = 1.0
+        self._render_image()
+
+    def _render_image(self):
+        if self._source_pixmap.isNull():
+            return
+        viewport = self.image_scroll.viewport().size()
+        viewport_width = max(80, int(viewport.width()) - 24)
+        viewport_height = max(80, int(viewport.height()) - 24)
+        fit_scale = min(viewport_width / max(1, self._source_pixmap.width()),
+                        viewport_height / max(1, self._source_pixmap.height()), 1.0)
+        scale = max(0.02, fit_scale * self._zoom_factor)
+        target = QSize(max(1, round(self._source_pixmap.width() * scale)),
+                       max(1, round(self._source_pixmap.height() * scale)))
+        rendered = self._source_pixmap.scaled(
+            target, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.image_label.setPixmap(rendered)
+        self.image_label.resize(rendered.size())
+        self.zoom_label.setText(f"{int(round(self._zoom_factor * 100))}%" if self._zoom_factor != 1.0 else "Fit")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._render_image)
+
+
 class AIMessageBubble(QFrame):
     """Responsive chat bubble with markdown/table rendering and visual region attachments."""
     selectionQuestionRequested = pyqtSignal(str, str)
@@ -251,7 +372,7 @@ class AIMessageBubble(QFrame):
                 path = attachment.get("path", "") if isinstance(attachment, dict) else str(attachment)
                 if not path or not os.path.isfile(path):
                     continue
-                thumb = QLabel()
+                thumb = ClickableChatImageLabel()
                 thumb.setObjectName("aiAttachmentThumb")
                 thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 thumb.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -264,7 +385,11 @@ class AIMessageBubble(QFrame):
                         tip = f"Attached image · page {int(attachment.get('page_index')) + 1}"
                     else:
                         tip = str(attachment.get("label") or "Attached image") if isinstance(attachment, dict) else "Attached image"
-                    thumb.setToolTip(tip + " · saved with this message")
+                    thumb.setToolTip(tip + " · click to open · saved with this message")
+                    thumb.setAccessibleName(tip + " · open image preview")
+                    thumb.clicked.connect(
+                        lambda image_path=path, image_title=tip: self.open_attachment_preview(image_path, image_title)
+                    )
                     attachment_grid.addWidget(thumb, attachment_index // attachment_columns, attachment_index % attachment_columns)
             if len(self._attachments) > len(visible_attachments):
                 more = QLabel(f"+{len(self._attachments) - len(visible_attachments)} more")
@@ -332,6 +457,28 @@ class AIMessageBubble(QFrame):
         row.addWidget(card)
         if not is_user:
             row.addStretch(1)
+
+    def open_attachment_preview(self, image_path: str, title: str = "Attached image"):
+        """Open a chat attachment without navigating away from the conversation."""
+        image_path = os.path.abspath(str(image_path or ""))
+        if not os.path.isfile(image_path):
+            return
+        current = getattr(self, "_attachment_preview_dialog", None)
+        try:
+            if current is not None and current.isVisible():
+                if os.path.normcase(str(getattr(current, "image_path", ""))) == os.path.normcase(image_path):
+                    current.raise_()
+                    current.activateWindow()
+                    return
+                current.close()
+        except RuntimeError:
+            self._attachment_preview_dialog = None
+        dialog = ChatImagePreviewDialog(image_path, title, self.window())
+        self._attachment_preview_dialog = dialog
+        dialog.destroyed.connect(lambda *_: setattr(self, "_attachment_preview_dialog", None))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def copy_message(self):
         """Copy this assistant response as reusable plain text/Markdown."""
@@ -1133,6 +1280,29 @@ class AIChatPanel(QFrame):
     def _stop_activity_animation(self):
         self._loading_timer.stop()
 
+    def _popup_parent(self):
+        """Return the real top-level owner for native popups opened by this embedded panel.
+
+        AIChatPanel is a child widget inside the main splitter, not a top-level window.
+        Passing it as the owner of a native QFileDialog/QMenu can make Qt use its
+        child QWidgetWindow as a transient parent, producing:
+        ``QWidgetWindow(aiPanelWindow) must be a top level window``.
+        Always anchor popups to the actual application window instead.
+        """
+        owner = getattr(self, "main_window", None)
+        try:
+            if isinstance(owner, QWidget) and owner.isWindow():
+                return owner
+        except RuntimeError:
+            pass
+        try:
+            top = self.window()
+            if isinstance(top, QWidget) and top.isWindow():
+                return top
+        except RuntimeError:
+            pass
+        return None
+
     def _apply_popup_menu_style(self, menu: QMenu, theme: str | None = None):
         """Apply the same menu palette used by every other Engo popup."""
         if menu is None:
@@ -1147,24 +1317,30 @@ class AIChatPanel(QFrame):
         self._add_menu_icon_color = _engo_menu_colors(active_theme)["fg"]
 
     def _show_add_menu(self):
-        menu = QMenu(self)
+        menu = QMenu(self._popup_parent())
         self._apply_popup_menu_style(menu)
         is_ar = str(self.settings.value("interface_language", "en", type=str) or "en").lower().startswith("ar")
         menu.setLayoutDirection(Qt.LayoutDirection.RightToLeft if is_ar else Qt.LayoutDirection.LeftToRight)
         icon_color = getattr(self, "_add_menu_icon_color", "#d9e2f0")
         danger_icon_color = "#dc777f" if normalize_ui_theme(self.settings.value("ui_theme", "dark", type=str)) != "light" else "#b54747"
+        # Keep the PDF question-region action at the very top of the + menu.
+        # It enters the existing AI region-selection workflow; the selected
+        # crop is then attached to the chat as a pending visual context.
+        ask_about_region = menu.addAction(
+            make_icon("select", icon_color, 16),
+            "تحديد منطقة للسؤال عنها" if is_ar else "Select area to ask AI about",
+        )
         add_file = menu.addAction(make_icon("open", icon_color, 16), "إضافة صورة من ملف…" if is_ar else "Add image from file…")
         paste_image = menu.addAction(make_icon("paste", icon_color, 16), "لصق صورة من الحافظة" if is_ar else "Paste image from clipboard")
         menu.addSeparator()
-        add_region = menu.addAction(make_icon("select", icon_color, 16), "تحديد منطقة من ملف PDF الحالي" if is_ar else "Select region from current PDF")
         clear = menu.addAction(make_icon("clear", danger_icon_color, 15), "مسح المرفقات المعلّقة" if is_ar else "Clear pending attachments")
         chosen = menu.exec(self.add_region_btn.mapToGlobal(self.add_region_btn.rect().topLeft()))
-        if chosen is add_file:
+        if chosen is ask_about_region:
+            self.main_window.start_ai_region_selection()
+        elif chosen is add_file:
             self.add_image_file()
         elif chosen is paste_image:
             self.paste_clipboard_image()
-        elif chosen is add_region:
-            self.main_window.start_ai_region_selection()
         elif chosen is clear:
             self.clear_selected_region()
 
@@ -1205,7 +1381,7 @@ class AIChatPanel(QFrame):
             self.main_window.show_status((f"تم إرفاق {regions[-1]['label']}" if is_ar else f"Attached {regions[-1]['label']}"))
         except Exception as exc:
             is_ar = str(self.settings.value("interface_language", "en", type=str) or "en").lower().startswith("ar")
-            QMessageBox.warning(self, "إضافة صورة" if is_ar else "Add image", (f"تعذر تحميل هذه الصورة:\n{exc}" if is_ar else f"Could not load this image:\n{exc}"))
+            QMessageBox.warning(self._popup_parent(), "إضافة صورة" if is_ar else "Add image", (f"تعذر تحميل هذه الصورة:\n{exc}" if is_ar else f"Could not load this image:\n{exc}"))
 
     def add_image_file(self):
         if not self.document_path:
@@ -1213,8 +1389,9 @@ class AIChatPanel(QFrame):
             self.main_window.show_status("افتح ملف PDF قبل إرفاق الصور" if is_ar else "Open a PDF before attaching images")
             return
         path = _engo_file_dialog(
-            self, "Attach image", "إرفاق صورة", str(Path.home()),
-            "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff);;All files (*.*)"
+            self._popup_parent(), "Attach image", "إرفاق صورة", str(Path.home()),
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff);;All files (*.*)",
+            native=True,
         )
         if not path:
             return
@@ -1227,7 +1404,7 @@ class AIChatPanel(QFrame):
                 self._add_pending_image(output.getvalue(), Path(path).name)
         except Exception as exc:
             is_ar = str(self.settings.value("interface_language", "en", type=str) or "en").lower().startswith("ar")
-            QMessageBox.warning(self, "إرفاق صورة" if is_ar else "Attach image", (f"تعذرت قراءة الصورة:\n{exc}" if is_ar else f"Could not read image:\n{exc}"))
+            QMessageBox.warning(self._popup_parent(), "إرفاق صورة" if is_ar else "Attach image", (f"تعذرت قراءة الصورة:\n{exc}" if is_ar else f"Could not read image:\n{exc}"))
 
     def paste_clipboard_image(self):
         image = QApplication.clipboard().image()
@@ -1281,7 +1458,7 @@ class AIChatPanel(QFrame):
     def _add_custom_pdf_action(self):
         is_ar = self._pdf_actions_is_arabic()
         title, ok = QInputDialog.getText(
-            self,
+            self._popup_parent(),
             "إضافة إجراء PDF" if is_ar else "Add PDF action",
             "اسم الإجراء:" if is_ar else "Action name:",
             QLineEdit.EchoMode.Normal,
@@ -1289,7 +1466,7 @@ class AIChatPanel(QFrame):
         if not ok or not str(title).strip():
             return
         prompt, ok = QInputDialog.getMultiLineText(
-            self,
+            self._popup_parent(),
             "تعليمات الإجراء" if is_ar else "Action instructions",
             "ما الذي تريد من Engo AI تنفيذه؟" if is_ar else "What should Engo AI do?",
             "",
@@ -1297,7 +1474,7 @@ class AIChatPanel(QFrame):
         if not ok or not str(prompt).strip():
             return
         scope, ok = QInputDialog.getItem(
-            self,
+            self._popup_parent(),
             "نطاق الإجراء" if is_ar else "Action scope",
             "يُطبّق على:" if is_ar else "Apply to:",
             ["صفحة PDF الحالية", "ملف PDF بالكامل"] if is_ar else ["Current PDF page", "Entire PDF"],
@@ -1327,7 +1504,7 @@ class AIChatPanel(QFrame):
 
     def _show_pdf_actions_menu(self):
         is_ar = self._pdf_actions_is_arabic()
-        menu = QMenu(self)
+        menu = QMenu(self._popup_parent())
         # Read the currently active theme from the owning window (the chat panel may
         # hold a QSettings instance created before the last theme change).
         theme_settings = self.settings
@@ -1734,7 +1911,7 @@ class AIChatPanel(QFrame):
         title = self.chat_store.get_chat_title(chat_id)
         is_ar = str(self.settings.value("interface_language", "en", type=str) or "en").lower().startswith("ar")
         answer = QMessageBox.question(
-            self,
+            self._popup_parent(),
             "حذف المحادثة؟" if is_ar else "Delete conversation?",
             (f"هل تريد حذف محادثة '{title}' نهائيًا؟\n\nسيتم حذف جميع الرسائل والصور المرفقة بهذه المحادثة. لا يمكن التراجع عن هذا الإجراء." if is_ar else f"Delete '{title}' permanently?\n\nAll messages and attached images in this conversation will be removed. This cannot be undone."),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -1746,7 +1923,7 @@ class AIChatPanel(QFrame):
         current_id = self.active_chat_ids.get(scope_key)
         was_active = current_id is not None and int(current_id) == chat_id
         if not self.chat_store.delete_chat(chat_id):
-            QMessageBox.warning(self, "تعذر حذف المحادثة" if is_ar else "Delete conversation", "لم يتم العثور على المحادثة أو ربما حُذفت بالفعل." if is_ar else "The conversation could not be found or was already deleted.")
+            QMessageBox.warning(self._popup_parent(), "تعذر حذف المحادثة" if is_ar else "Delete conversation", "لم يتم العثور على المحادثة أو ربما حُذفت بالفعل." if is_ar else "The conversation could not be found or was already deleted.")
             return
 
         if was_active:
@@ -2424,7 +2601,7 @@ class AIChatPanel(QFrame):
         is_ar = str(self.settings.value("interface_language", "en", type=str) or "en").lower().startswith("ar")
         if self._busy:
             QMessageBox.information(
-                self, "Engo AI مشغول" if is_ar else "Engo AI is busy",
+                self._popup_parent(), "Engo AI مشغول" if is_ar else "Engo AI is busy",
                 "انتظر حتى تنتهي الإجابة الحالية، ثم حدّد المقطع مرة أخرى." if is_ar else "Wait for the current answer to finish, then select the passage again."
             )
             return
@@ -2567,7 +2744,7 @@ class AIChatPanel(QFrame):
         self.stop_audio_btn.setEnabled(True)
 
     def _export_menu(self):
-        menu = QMenu(self)
+        menu = QMenu(self._popup_parent())
         md_action = menu.addAction(make_icon("export", "#b7c6dc", 15), "Export as Markdown (.md)")
         pdf_action = menu.addAction(make_icon("export", "#b7c6dc", 15), "Export as PDF (.pdf)")
         chosen = menu.exec(self.export_btn.mapToGlobal(self.export_btn.rect().bottomLeft()))
@@ -2622,7 +2799,7 @@ class AIChatPanel(QFrame):
             self.main_window.show_status((f"تم تصدير المحادثة إلى {path}" if is_ar else f"Chat exported to {path}"))
         except Exception as exc:
             is_ar = str(self.settings.value("interface_language", "en", type=str) or "en").lower().startswith("ar")
-            QMessageBox.warning(self, "تصدير المحادثة" if is_ar else "Export chat", (f"تعذر تصدير ملف Markdown:\n{exc}" if is_ar else f"Could not export Markdown:\n{exc}"))
+            QMessageBox.warning(self._popup_parent(), "تصدير المحادثة" if is_ar else "Export chat", (f"تعذر تصدير ملف Markdown:\n{exc}" if is_ar else f"Could not export Markdown:\n{exc}"))
 
     def export_pdf(self):
         if not self.document_path:
@@ -2689,4 +2866,4 @@ class AIChatPanel(QFrame):
             self.main_window.show_status((f"تم تصدير المحادثة بصيغة PDF إلى {path}" if is_ar else f"Formatted chat PDF exported to {path}"))
         except Exception as exc:
             is_ar = str(self.settings.value("interface_language", "en", type=str) or "en").lower().startswith("ar")
-            QMessageBox.warning(self, "تصدير المحادثة" if is_ar else "Export chat", (f"تعذر تصدير ملف PDF:\n{exc}" if is_ar else f"Could not export PDF:\n{exc}"))
+            QMessageBox.warning(self._popup_parent(), "تصدير المحادثة" if is_ar else "Export chat", (f"تعذر تصدير ملف PDF:\n{exc}" if is_ar else f"Could not export PDF:\n{exc}"))

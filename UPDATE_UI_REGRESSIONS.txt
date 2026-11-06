@@ -1,0 +1,43 @@
+ENGO UI REGRESSION FIXES
+
+This update corrects the three regressions reported after the previous UI/Escape patch.
+
+1) Full-page gallery uses the available width
+   - Desktop layouts use at least 6 columns when the usable viewport is wide enough.
+   - Wider displays gain columns responsively, up to 12.
+   - Grid tile sizes are recalculated for all existing items after resize; QListWidgetItem size hints no longer remain stale.
+   - Thumbnail icon height scales with its width so portrait PDF pages use more of each tile while retaining their original aspect ratio.
+
+2) PDF selection rectangle behavior restored
+   - Removed the unnecessary keyboard focus changes previously added to DocumentCanvas.
+   - Restored the original additive/non-additive marquee selection semantics.
+   - Kept a separate snapshot of the pre-drag selection so Escape can cancel the drag and restore the previous selection without changing normal successful selection behavior.
+   - Escape cancellation remains installed through the application's event filter.
+
+3) PDF scroll anchor preserved on both chat open and close
+   - The document reading anchor is captured before closing the chat panel.
+   - It remains active during the panel width animation and final full-width PDF relayout.
+   - The anchor is released only after the final layout settles.
+
+Build configuration was not changed by this update:
+   - GitHub workflow continues to pass -NuitkaJobs 2.
+   - Normal Nuitka compilation continues with --jobs=2 and MSVC.
+   - --low-memory remains an optional emergency fallback only; it is not enabled in the workflow.
+
+Files modified in this update:
+   - main.py
+   - engo_document.py
+
+Update an existing clone/repository:
+   1. Back up your current project folder.
+   2. Replace main.py and engo_document.py with these versions.
+   3. Run:
+        git add main.py engo_document.py
+        git commit -m "Fix gallery layout and preserve PDF scroll on chat close"
+        git push origin main
+
+Validation performed here:
+   - Python syntax compilation passed for the project source files.
+   - ZIP integrity was checked.
+   - GitHub workflow still specifies two Nuitka compiler jobs.
+   - The Qt GUI was not launched in this environment, so visual confirmation on Windows is still required.

@@ -1,0 +1,22 @@
+UPDATE YOUR EXISTING ENGO GITHUB REPOSITORY
+
+You already ran git init / git remote add origin / git push. Do NOT repeat them.
+
+1) Extract this ZIP to a temporary folder.
+2) Copy these four updated files into your EXISTING local repo folder, replacing them:
+   build_release.ps1
+   .github\workflows\build.yml
+   BUILD_SETUP_RECOVERY.bat
+   BUILD_FAILURE_FIX_GUIDE.txt
+3) Open PowerShell in the existing repo folder and run:
+
+   git status
+   git add build_release.ps1 .github/workflows/build.yml BUILD_SETUP_RECOVERY.bat BUILD_FAILURE_FIX_GUIDE.txt
+   git commit -m "Fix MSVC selection and preserve two-job parallel build"
+   git push origin main
+
+The push triggers the Build Engo Setup workflow automatically. To rerun manually:
+GitHub repo > Actions > Build Engo Setup > Run workflow > Run workflow.
+
+Normal GitHub build uses Nuitka --jobs=2. The optional -LowMemory switch is a
+emergency fallback only and forces one job.

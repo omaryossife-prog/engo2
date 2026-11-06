@@ -1,0 +1,35 @@
+Engo fix: native popup owner + universal Escape for crosshair tools
+
+Files changed:
+- engo_ai_chat.py
+- main.py
+
+1) Qt QWidgetWindow(aiPanelWindow) must be a top level window warning
+   All AI chat menus, native file dialogs, message boxes, and input dialogs now
+   use the real top-level Engo main window as their popup owner instead of the
+   embedded AIChatPanel child widget. This retains the native Windows file
+   picker while giving Qt a valid transient parent.
+
+2) Escape behavior
+   Escape now cancels any in-progress PDF pointer gesture. If the active tool
+   uses the crosshair/plus cursor (AI region selection, translation, pen,
+   highlight, note, text, link, tag, or another non-Select/non-Pan tool), Escape
+   also exits that command and returns the document to ordinary Select with an
+   arrow cursor, including when no drag has started yet. Select marquee/text
+   gestures are cancelled without changing the Select tool. Linked canvases,
+   toolbar state, and bottom context help are synchronized.
+
+GitHub update (run from the existing local repository; do not run git init):
+  git add main.py engo_ai_chat.py
+  git commit -m "Fix AI popup owner and universal Escape tool cancel"
+  git push origin main
+
+Build configuration was not changed. GitHub Actions still invokes Nuitka with
+-NuitkaJobs 2, which passes --jobs=2 in the normal MSVC build. --low-memory is
+still an opt-in emergency mode only.
+
+Validation performed:
+- Python syntax compilation passed for all project .py files.
+- ZIP integrity check passed.
+- Build workflow still contains -NuitkaJobs 2 and timeout-minutes: 360.
+- Actual Qt/Windows runtime behavior still needs to be verified on Windows.

@@ -1,4 +1,4 @@
-name: Build Engo Setup
+﻿name: Build Engo Setup
 
 on:
   workflow_dispatch:   # manual "Run workflow" button in the Actions tab
@@ -32,7 +32,7 @@ jobs:
   build:
     needs: check
     runs-on: windows-latest
-    timeout-minutes: 240
+    timeout-minutes: 360
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -64,15 +64,16 @@ jobs:
           path: |
             build\nuitka
             ~\AppData\Local\Nuitka
-          key: nuitka-${{ runner.os }}-py313-${{ hashFiles('requirements.txt', 'requirements-build.txt', 'build_release.ps1') }}-${{ github.sha }}
+          key: nuitka-${{ runner.os }}-py313-msvc-2jobs-${{ hashFiles('requirements.txt', 'requirements-build.txt', 'build_release.ps1') }}-${{ github.sha }}
           restore-keys: |
-            nuitka-${{ runner.os }}-py313-${{ hashFiles('requirements.txt', 'requirements-build.txt', 'build_release.ps1') }}-
+            nuitka-${{ runner.os }}-py313-msvc-2jobs-${{ hashFiles('requirements.txt', 'requirements-build.txt', 'build_release.ps1') }}-
 
-      - name: Build with build_release.ps1 (parallel Nuitka, all runner cores)
+      - name: Build with build_release.ps1 (MSVC, parallel 2 compiler jobs)
         shell: pwsh
         run: |
           Write-Host "Logical processors: $env:NUMBER_OF_PROCESSORS"
-          .\build_release.ps1 -BuildMode FULL -SkipOptionalPyAudio -NuitkaJobs ([int]$env:NUMBER_OF_PROCESSORS)
+          Write-Host "Nuitka compiler jobs: 2 (parallel C compilation)"
+          .\build_release.ps1 -BuildMode FULL -SkipOptionalPyAudio -NuitkaJobs 2
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4

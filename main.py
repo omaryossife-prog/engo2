@@ -208,6 +208,9 @@ class MainWindow(QMainWindow):
         self._chat_focus_chrome_animations = []
         self._chat_focus_chrome_tracks = []
         self._chat_focus_transition_active = False
+        # Two quick Space taps in the PDF reader open the text chat. The first
+        # tap is left untouched; auto-repeat while holding Space never counts.
+        self._space_double_tap_at = 0.0
         self._fullscreen_toolbar_hide_timer = QTimer(self)
         self._fullscreen_toolbar_hide_timer.setSingleShot(True)
         self._fullscreen_toolbar_hide_timer.setInterval(420)
@@ -6019,6 +6022,17 @@ class MainWindow(QMainWindow):
             self._view_animation = None
 
         self._chat_panel_anim_until = 0.0
+        # Preserve the same page-relative reading point while the chat closes too.
+        # Releasing the anchor before the close animation lets the wider PDF canvas
+        # reflow and changes the vertical scroll position when the chat disappears.
+        close_anchor_tab = None
+        if not show and panel.isVisible():
+            close_anchor_tab = self.active_tab()
+            if close_anchor_tab is not None:
+                try:
+                    close_anchor_tab.begin_chat_viewport_anchor_preservation()
+                except (RuntimeError, AttributeError):
+                    close_anchor_tab = None
         total_width = max(1, self.workspace.width())
         if show:
             if panel.isVisible() and panel.width() > 0:
@@ -6034,6 +6048,16 @@ class MainWindow(QMainWindow):
                     QTimer.singleShot(45, self._finish_chat_transcript_resize)
                 panel.prompt_edit.setFocus()
                 return
+
+            # Capture the visible page-relative reading point before the reader
+            # viewport gets narrower. DocumentTab restores this anchor during each
+            # resize pass, so opening chat does not pull the PDF toward another page.
+            viewport_anchor_tab = self.active_tab()
+            if viewport_anchor_tab is not None:
+                try:
+                    viewport_anchor_tab.begin_chat_viewport_anchor_preservation()
+                except (RuntimeError, AttributeError):
+                    viewport_anchor_tab = None
 
             if board_width is None:
                 sizes_now = list(self.workspace.sizes())
@@ -6066,7 +6090,7 @@ class MainWindow(QMainWindow):
                 lambda _value: self._reflow_visible_chat_transcript_during_resize()
             )
 
-            def finish_open(p=panel, target=chat_width, board=board_width):
+            def finish_open(p=panel, target=chat_width, board=board_width, anchor_tab=viewport_anchor_tab):
                 try:
                     self._chat_panel_anim_until = 0.0
                     p.setMaximumWidth(720)
@@ -6079,8 +6103,16 @@ class MainWindow(QMainWindow):
                     # history only after the final splitter geometry has been applied.
                     QTimer.singleShot(35, self._finish_chat_transcript_resize)
                     QTimer.singleShot(0, self._relayout_active_pdf_after_panel_animation)
+                    if anchor_tab is not None:
+                        # Let the final coalesced PDF layout finish, then release
+                        # the temporary anchor so normal user scrolling is untouched.
+                        QTimer.singleShot(135, anchor_tab.end_chat_viewport_anchor_preservation)
                 except RuntimeError:
-                    pass
+                    if anchor_tab is not None:
+                        try:
+                            anchor_tab.end_chat_viewport_anchor_preservation()
+                        except Exception:
+                            pass
             anim.finished.connect(finish_open)
             self._view_animation = anim
             anim.start()
@@ -6111,7 +6143,7 @@ class MainWindow(QMainWindow):
             )
             self.ai_chat_btn.setChecked(False)
 
-            def finish_close(p=panel):
+            def finish_close(p=panel, anchor_tab=close_anchor_tab):
                 try:
                     self._chat_panel_anim_until = 0.0
                     p.hide()
@@ -6121,8 +6153,23 @@ class MainWindow(QMainWindow):
                     self.workspace.setSizes([max(1, self.workspace.width()), 0, 0])
                     self._set_default_context_help(force=True)
                     QTimer.singleShot(0, self._relayout_active_pdf_after_panel_animation)
+                    # Closing chat must return keyboard focus to the PDF canvas.
+                    # Otherwise the hidden prompt editor keeps focus and prevents
+                    # the double-Space reader shortcut from being recognized.
+                    closed_tab = self.active_tab()
+                    if closed_tab is not None:
+                        QTimer.singleShot(30, lambda t=closed_tab: getattr(t, "canvas", None).setFocus()
+                                          if getattr(t, "canvas", None) is not None else None)
+                    if anchor_tab is not None:
+                        # Let the final full-width PDF layout settle while the
+                        # page-relative anchor is still active, then release it.
+                        QTimer.singleShot(160, anchor_tab.end_chat_viewport_anchor_preservation)
                 except RuntimeError:
-                    pass
+                    if anchor_tab is not None:
+                        try:
+                            anchor_tab.end_chat_viewport_anchor_preservation()
+                        except (RuntimeError, AttributeError):
+                            pass
             anim.finished.connect(finish_close)
             self._view_animation = anim
             anim.start()
@@ -6142,8 +6189,9 @@ class MainWindow(QMainWindow):
 
     def start_ai_region_selection(self):
         tab = self.active_tab()
+        is_ar = self._context_help_language() == "ar"
         if not tab:
-            self.show_status("Open a PDF first")
+            self.show_status("افتح ملف PDF أولًا" if is_ar else "Open a PDF first")
             return
         if not self.ai_panel.isVisible():
             self._animate_ai_panel(True)
@@ -6151,7 +6199,12 @@ class MainWindow(QMainWindow):
         for key, button in self.tool_buttons.items():
             button.setChecked(key == "select")
         tab.set_tool("ai_select")
-        self.show_status("Drag a rectangle around the text, equation, diagram, or handwriting to attach it to AI chat")
+        self._show_selected_tool_context_help("ai_select")
+        self.show_status(
+            "اسحب مستطيلًا حول النص أو المعادلة أو الرسم أو الكتابة اليدوية لإرفاقها بسؤال AI · اضغط Esc للإلغاء"
+            if is_ar else
+            "Drag around text, an equation, diagram, or handwriting to attach it to your AI question · Press Esc to cancel"
+        )
 
     def _capture_live_page(self, pdf_path: str, page_index: int):
         """Render the exact PDF page using the same saved page theme as the main viewer."""
@@ -8747,13 +8800,13 @@ class MainWindow(QMainWindow):
         for key, button in getattr(self, "tool_buttons", {}).items():
             if button is widget:
                 tool_pairs = {
-                    "select": ("أداة التحديد: انقر على تعليق لتحديده أو على رابط لفتحه. اسحب لتحريك الصفحة عند اختيار وضع اليد.", "Select: click an annotation to select it or a link to open it. Choose Hand to drag the page."),
-                    "pen": ("القلم: اسحب على الصفحة للرسم أو كتابة الملاحظات بخط اليد.", "Pen: drag on the page to draw or write handwritten notes."),
-                    "highlight": ("التظليل: اسحب فوق النص لتظليله، أو فوق مساحة في الصفحة لتحديدها.", "Highlight: drag over text to highlight it, or over a page area to mark it."),
-                    "note": ("ملاحظة: انقر على الموضع الذي تريد إضافة ملاحظة لاصقة إليه.", "Note: click where you want to place a sticky-note comment."),
-                    "text": ("نص: انقر على الصفحة لوضع مربع نص ثم اكتب محتواه.", "Text: click the page to place a text box, then type its contents."),
-                    "link": ("رابط: اسحب لتحديد منطقة، ثم اختر الصفحة التي سينتقل إليها الرابط.", "Link: drag to mark an area, then choose the destination page for the link."),
-                    "tag": ("وسم: اسحب فوق منطقة لإسناد الوسم المحدد إليها، أو افتح السهم لإدارة الوسوم.", "Tag: drag over an area to assign the selected tag, or open the arrow to manage tags."),
+                    "select": ("أداة التحديد: انقر على تعليق لتحديده أو على رابط لفتحه. أثناء سحب مستطيل التحديد اضغط Esc لإلغائه.", "Select: click an annotation to select it or a link to open it. Press Esc to cancel a selection rectangle while dragging."),
+                    "pen": ("القلم: اسحب على الصفحة للرسم أو كتابة الملاحظات. اضغط Esc لإلغاء الرسم الجاري.", "Pen: drag on the page to draw or write notes. Press Esc to cancel the stroke in progress."),
+                    "highlight": ("التظليل: اسحب فوق النص أو المنطقة لتظليلها. اضغط Esc لإلغاء التحديد قبل إفلات الماوس.", "Highlight: drag over text or an area to highlight it. Press Esc to cancel before releasing the mouse."),
+                    "note": ("ملاحظة: انقر على الموضع الذي تريد إضافة ملاحظة لاصقة إليه. اضغط Esc لإلغاء وضعها أثناء السحب.", "Note: click where you want to place a sticky note. Press Esc to cancel its placement while dragging."),
+                    "text": ("نص: انقر على الصفحة لوضع مربع نص ثم اكتب محتواه. اضغط Esc لإلغاء السحب الجاري.", "Text: click the page to place a text box, then type. Press Esc to cancel the placement in progress."),
+                    "link": ("رابط: اسحب لتحديد منطقة الرابط، ثم اختر وجهته. اضغط Esc لإلغاء تحديد المنطقة.", "Link: drag to mark the link area, then choose its destination. Press Esc to cancel the area selection."),
+                    "tag": ("وسم: اسحب فوق منطقة لإسناد الوسم إليها. اضغط Esc لإلغاء التحديد قبل إفلات الماوس.", "Tag: drag over an area to assign the tag. Press Esc to cancel before releasing the mouse."),
                 }
                 values = tool_pairs.get(key)
                 if values:
@@ -8820,18 +8873,21 @@ class MainWindow(QMainWindow):
             return
         tab = self._view_target_tab() or self.active_tab()
         active = str(tool or getattr(tab, "active_tool", "select") or "select")
+        is_ar = self._context_help_language() == "ar"
         values = {
-            "select": ("أداة التحديد جاهزة. انقر على عنصر لتحديده أو اختر أداة اليد من القائمة." if self._context_help_language() == "ar" else "Select is ready. Click an item to select it, or choose Hand from its menu."),
-            "pan": ("أداة اليد جاهزة. اسحب الصفحة لتحريكها." if self._context_help_language() == "ar" else "Hand is ready. Drag the page to pan."),
-            "pen": ("القلم جاهز. اسحب على الصفحة للرسم أو الكتابة." if self._context_help_language() == "ar" else "Pen is ready. Drag on the page to draw or write."),
-            "highlight": ("التظليل جاهز. اسحب فوق النص أو المنطقة التي تريد تمييزها." if self._context_help_language() == "ar" else "Highlight is ready. Drag across the text or area you want to mark."),
-            "note": ("الملاحظات جاهزة. انقر على الصفحة لوضع ملاحظة لاصقة." if self._context_help_language() == "ar" else "Note is ready. Click the page to place a sticky note."),
-            "text": ("أداة النص جاهزة. انقر على الصفحة لوضع مربع نص." if self._context_help_language() == "ar" else "Text is ready. Click the page to place a text box."),
-            "link": ("أداة الرابط جاهزة. اسحب لتحديد منطقة الرابط." if self._context_help_language() == "ar" else "Link is ready. Drag to mark the link area."),
-            "tag": ("أداة الوسم جاهزة. اسحب فوق المنطقة لإسناد الوسم المحدد." if self._context_help_language() == "ar" else "Tag is ready. Drag over an area to assign the selected tag."),
-            "translate_select": ("أداة الترجمة جاهزة. اسحب حول النص أو الكتابة اليدوية لترجمتها من ملف PDF المحدد." if self._context_help_language() == "ar" else "Translate is ready. Drag around text or handwriting in the selected PDF to translate it."),
+            "select": ("أداة التحديد جاهزة. انقر على عنصر لتحديده. أثناء سحب مستطيل التحديد اضغط Esc لإلغائه.", "Select is ready. Click an item to select it. Press Esc to cancel a selection rectangle while dragging."),
+            "pan": ("أداة اليد جاهزة. اسحب الصفحة لتحريكها.", "Hand is ready. Drag the page to pan."),
+            "pen": ("القلم جاهز. اسحب على الصفحة للرسم أو الكتابة. اضغط Esc لإلغاء الرسم الجاري.", "Pen is ready. Drag on the page to draw or write. Press Esc to cancel the stroke in progress."),
+            "highlight": ("التظليل جاهز. اسحب فوق النص أو المنطقة لتمييزها. اضغط Esc لإلغاء التحديد قبل إفلات الماوس.", "Highlight is ready. Drag over text or an area to mark it. Press Esc to cancel before releasing the mouse."),
+            "note": ("الملاحظات جاهزة. انقر لوضع ملاحظة لاصقة. اضغط Esc لإلغاء وضعها الجاري.", "Sticky notes are ready. Click to place a note. Press Esc to cancel the placement in progress."),
+            "text": ("أداة النص جاهزة. انقر لوضع مربع نص. اضغط Esc لإلغاء وضعه الجاري.", "Text is ready. Click to place a text box. Press Esc to cancel the placement in progress."),
+            "link": ("أداة الرابط جاهزة. اسحب لتحديد منطقة الرابط. اضغط Esc لإلغاء التحديد.", "Link is ready. Drag to mark the link area. Press Esc to cancel the selection."),
+            "tag": ("أداة الوسم جاهزة. اسحب فوق المنطقة لإسناد الوسم. اضغط Esc لإلغاء التحديد.", "Tag is ready. Drag over an area to assign the tag. Press Esc to cancel the selection."),
+            "translate_select": ("أداة الترجمة جاهزة. اسحب حول النص أو الكتابة اليدوية لترجمتها. اضغط Esc لإلغاء التحديد.", "Translation is ready. Drag around text or handwriting to translate it. Press Esc to cancel the selection."),
+            "ai_select": ("تحديد منطقة للسؤال عنها: اسحب حول النص أو المعادلة أو الرسم لإرفاقها بسؤالك. اضغط Esc للإلغاء والعودة للماوس العادي.", "Ask AI about an area: drag around text, an equation, or a diagram to attach it to your question. Press Esc to cancel and return to the normal pointer."),
         }
-        self._set_context_help(values.get(active, self._context_help_default_text()))
+        selected = values.get(active)
+        self._set_context_help((selected[0] if is_ar else selected[1]) if selected else self._context_help_default_text())
 
     def _context_help_hover_target(self, watched):
         node = watched if isinstance(watched, QWidget) else None
@@ -8920,6 +8976,110 @@ class MainWindow(QMainWindow):
                 break
         return False
 
+    def _is_pdf_reader_space_target(self, watched) -> bool:
+        """Only enable the double-Space chat shortcut while focus is in the PDF reader."""
+        if (self._files_screen_active or self._presentation or self._chat_focus_mode
+                or not hasattr(self, "ai_panel") or self.ai_panel.isVisible()):
+            return False
+        tab = self.active_tab()
+        if tab is None or not isinstance(watched, QWidget):
+            return False
+        app = QApplication.instance()
+        if app is not None and app.activeModalWidget() is not None:
+            return False
+        if getattr(tab, "_page_overview_active", False):
+            return False
+        # Space remains normal in editors, controls, lists, and buttons. The
+        # shortcut works from the document surface or other passive areas of the
+        # main window, even when Qt has left focus on QMainWindow itself.
+        non_reader_targets = (QLineEdit, QTextEdit, QComboBox, QSpinBox, QCheckBox,
+                              QAbstractItemView, QPushButton, QToolButton)
+        node = watched
+        while node is not None:
+            if isinstance(node, non_reader_targets):
+                return False
+            if node is self:
+                return True
+            try:
+                node = node.parentWidget()
+            except RuntimeError:
+                return False
+        return False
+
+    def _escape_cancel_active_pdf_selection(self):
+        """Cancel a live pointer gesture and leave any crosshair tool on normal Select.
+
+        Escape is a universal cancel for tools that switch the PDF pointer to a
+        crosshair/plus cursor (AI region, translate, pen, highlight, note, text,
+        link, tag, and future drawing tools), even before the user starts dragging.
+        A plain Select marquee/text drag is cancelled without changing Select.
+        """
+        candidates = []
+        for candidate in (self._view_target_tab(), self.active_tab()):
+            if candidate is not None and candidate not in candidates:
+                candidates.append(candidate)
+        primary = self.active_tab()
+        secondary = getattr(primary, "_linked_view_secondary", None) if primary is not None else None
+        if secondary is not None and secondary not in candidates:
+            candidates.append(secondary)
+
+        for tab in candidates:
+            canvas = getattr(tab, "canvas", None)
+            checker = getattr(canvas, "has_active_pointer_selection", None)
+            cancel = getattr(canvas, "cancel_active_pointer_selection", None)
+            has_gesture = bool(callable(checker) and checker())
+            active_tool = str(getattr(tab, "active_tool", "select") or "select")
+            # DocumentTab maps every active tool except Select and Hand/Pan to
+            # Qt.CrossCursor. Treat all such modes identically on Escape.
+            crosshair_mode = active_tool not in ("", "select", "pan")
+
+            cancelled_gesture = bool(callable(cancel) and has_gesture and cancel())
+            if not cancelled_gesture and not crosshair_mode:
+                continue
+
+            if crosshair_mode:
+                try:
+                    tab.set_tool("select")
+                except Exception:
+                    try:
+                        if canvas is not None:
+                            canvas.setCursor(Qt.CursorShape.ArrowCursor)
+                    except (RuntimeError, AttributeError):
+                        pass
+
+                # Keep the toolbar, Select/Hand split button, linked canvas, and
+                # bottom helper text in sync with the reset tool.
+                is_view_target = tab is (self._view_target_tab() or self.active_tab())
+                if is_view_target:
+                    for key, button in getattr(self, "tool_buttons", {}).items():
+                        try:
+                            active = key == "select"
+                            button.setProperty("activeTool", active)
+                            if button.isChecked() != active:
+                                button.setChecked(active)
+                            button.style().unpolish(button)
+                            button.style().polish(button)
+                            button.update()
+                        except RuntimeError:
+                            pass
+                    try:
+                        self._refresh_selector_tool_button(tab)
+                        self._refresh_view_target_style()
+                        self._show_selected_tool_context_help("select")
+                    except Exception:
+                        pass
+            elif cancelled_gesture:
+                # A marquee or text selection started from normal Select: keep
+                # Select active, but restore its ordinary arrow cursor.
+                try:
+                    if canvas is not None:
+                        canvas.setCursor(Qt.CursorShape.ArrowCursor)
+                    self._show_selected_tool_context_help("select")
+                except Exception:
+                    pass
+            return True
+        return False
+
     def eventFilter(self, watched, event):
         try:
             is_our_widget = watched is self
@@ -8935,6 +9095,54 @@ class MainWindow(QMainWindow):
                         node = None
             if is_our_widget:
                 event_type = event.type()
+                if event_type in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
+                    try:
+                        escape_key = event.key() == Qt.Key.Key_Escape
+                        no_modifiers = event.modifiers() == Qt.KeyboardModifier.NoModifier
+                    except (AttributeError, RuntimeError):
+                        escape_key = no_modifiers = False
+                    if escape_key and no_modifiers:
+                        if event_type == QEvent.Type.ShortcutOverride:
+                            # Mark Escape as owned by the PDF reader while a drag
+                            # selection is active, instead of triggering exit_modes.
+                            escape_tabs = []
+                            for candidate in (self._view_target_tab(), self.active_tab(),
+                                              getattr(self.active_tab(), "_linked_view_secondary", None)):
+                                if candidate is not None and candidate not in escape_tabs:
+                                    escape_tabs.append(candidate)
+                            has_pending = any(
+                                (callable(getattr(getattr(tab, "canvas", None), "has_active_pointer_selection", None))
+                                 and tab.canvas.has_active_pointer_selection())
+                                or str(getattr(tab, "active_tool", "select") or "select") not in ("", "select", "pan")
+                                for tab in escape_tabs
+                            )
+                            if has_pending:
+                                event.accept()
+                                return True
+                        elif self._escape_cancel_active_pdf_selection():
+                            event.accept()
+                            return True
+                if event_type == QEvent.Type.KeyPress:
+                    key = event.key()
+                    if key == Qt.Key.Key_Space:
+                        is_repeat = bool(event.isAutoRepeat())
+                        if not is_repeat and self._is_pdf_reader_space_target(watched):
+                            now = time.monotonic()
+                            previous = float(getattr(self, "_space_double_tap_at", 0.0) or 0.0)
+                            if previous and 0.0 <= now - previous <= 2.0:
+                                self._space_double_tap_at = 0.0
+                                event.accept()
+                                self._animate_ai_panel(True)
+                                return True
+                            # Consume the first tap too: it is only a candidate
+                            # for the double-tap gesture and must not scroll the PDF.
+                            self._space_double_tap_at = now
+                            event.accept()
+                            return True
+                        elif not is_repeat:
+                            self._space_double_tap_at = 0.0
+                    elif not bool(event.isAutoRepeat()):
+                        self._space_double_tap_at = 0.0
                 if (watched is getattr(self, "home_browser_tree", None)
                         or watched is getattr(getattr(self, "home_browser_tree", None), "viewport", lambda: None)()):
                     if event_type == QEvent.Type.Resize:

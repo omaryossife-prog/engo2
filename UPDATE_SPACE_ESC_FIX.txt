@@ -1,0 +1,19 @@
+Engo – Double-Space and AI-region Escape fix
+
+Changes:
+1) Double-Space opens the chat only after two separate Space key presses within 2.0 seconds.
+   The first Space press is consumed so it does not scroll the PDF. Key auto-repeat while
+   holding Space does not count as a second press.
+2) Closing the chat returns keyboard focus to the active PDF canvas, so the shortcut works
+   again after the chat has been closed.
+3) Escape while an AI-region selection is active cancels the rectangle and cancels the
+   AI-region selection mode itself: the active tool returns to Select and the normal arrow
+   cursor is restored. It will not leave the user in AI-region capture mode.
+
+To update an existing GitHub clone, replace main.py, then run:
+  git add main.py UPDATE_SPACE_ESC_FIX.txt
+  git commit -m "Fix double-space chat toggle and cancel AI region mode"
+  git push origin main
+
+The GitHub two-job Nuitka configuration is unchanged.
+Validation: Python syntax compilation passed. GUI interaction still needs testing on Windows.

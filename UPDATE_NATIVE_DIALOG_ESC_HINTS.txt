@@ -1,0 +1,15 @@
+ENGO UPDATE — Native image picker + localized selection/cancel hints
+
+Files changed:
+- engo_ai_chat.py: image attachment now calls the existing native=True file-dialog path.
+- main.py: Ask-AI-region mode now sets the permanent bottom helper in Arabic/English; drag/select tool hints mention Esc; canceling AI-region selection restores the Select hint.
+
+Update your existing GitHub working folder by replacing only those two files, then run:
+
+git add main.py engo_ai_chat.py
+git commit -m "Use native image picker and improve selection hints"
+git push origin main
+
+Build configuration was not changed. The existing workflow still invokes Nuitka with -NuitkaJobs 2, which generates --jobs=2. MSVC configuration and optional one-job low-memory emergency mode were not changed.
+
+Validation performed here: Python syntax compilation for all top-level Python modules and ZIP integrity check. The native Windows dialog and the PyQt UI interactions still need a Windows runtime test.

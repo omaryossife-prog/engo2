@@ -1,20 +1,17 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [switch]$InstallAfterBuild,
     [switch]$SkipDependencyInstall,
     [switch]$SkipOptionalPyAudio,
     [switch]$CleanNuitkaWorkspace,
     [ValidateSet('FULL','FAST')][string]$BuildMode = 'FULL',
-    # Lets you tune Nuitka's C/C++ compile parallelism empirically (per the
-    # thermal-tuning requirement) instead of always using every logical
-    # processor. 0 (default) = auto: use the physical core count, which is
-    # usually the better starting point on hyperthreaded/SMT laptops like an
-    # i7-8750H (6 cores / 12 threads), since 12 concurrent compiler processes
-    # contending for 6 physical cores is what drives sustained high heat
-    # without a matching compile-time benefit. Pass an explicit value to
-    # override, e.g. -NuitkaJobs 4 or -NuitkaJobs 8, and compare build time
-    # and peak temperature across runs to find your own best balance.
+    # Limit the number of parallel native C compiler jobs. The GitHub workflow
+    # explicitly passes 2 so the normal hosted build remains a two-job build.
+    # Locally, 0 (default) selects the detected physical core count.
     [int]$NuitkaJobs = 0,
+    # Emergency fallback only: Nuitka --low-memory forces one compiler job.
+    # Keep this OFF for normal GitHub builds to preserve the requested 2-job build.
+    [switch]$LowMemory,
     # Nuitka's --show-progress/--show-memory/--show-modules print a line of
     # output for every module Nuitka analyzes. That console/log I/O adds
     # measurable overhead during the slow Python-analysis phase (the phase
@@ -34,6 +31,7 @@ $script:BuildExitCode = 0
 $script:BuildSucceeded = $false
 $script:CancelRequested = $false
 $script:CancelHandler = $null
+$script:CompilerFatalErrorDetected = $false
 $LogDir = Join-Path $ProjectRoot 'build_logs'
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 # One unique run ID ties the stage log and full session log together.
@@ -46,14 +44,10 @@ $SessionLogPath = Join-Path $LogDir $SessionLogName
 $script:LogWriter = $null
 $script:SessionLogWriter = $null
 
-# Nuitka compile parallelism. Default changed from "every logical processor"
-# to the physical core count: on hyperthreaded/SMT CPUs the C/C++ compile
-# stage gets most of its benefit from physical cores, and pushing jobs to the
-# logical thread count (e.g. 12 on a 6-core/12-thread i7-8750H) is what was
-# observed driving the CPU to 96C with repeated thermal throttling, without a
-# proportional speedup. -NuitkaJobs overrides this if you want to test other
-# values. This does NOT touch the Windows power plan or any BIOS/power
-# setting; it only changes how many parallel compiler processes Nuitka starts.
+# Keep normal native compilation parallel. GitHub Actions passes
+# -NuitkaJobs 2 explicitly; the developer machine defaults to physical cores.
+# The optional -LowMemory switch is a manual fallback for C1002 and forces one
+# compiler job, so it must never be enabled in the normal 2-job workflow.
 $script:LogicalProcessorCount = [Math]::Max(1, [int][Environment]::ProcessorCount)
 $script:PhysicalCoreCount = $script:LogicalProcessorCount
 try {
@@ -62,11 +56,11 @@ try {
         $script:PhysicalCoreCount = [int]$CimProcessor.NumberOfCores
     }
 } catch {
-    # Win32_Processor not available (non-Windows test run, WMI disabled, etc.):
-    # fall back to half the logical processor count as a reasonable estimate.
     $script:PhysicalCoreCount = [Math]::Max(1, [Math]::Floor($script:LogicalProcessorCount / 2))
 }
-if ($NuitkaJobs -gt 0) {
+if ($LowMemory) {
+    $script:BuildNuitkaJobs = 1
+} elseif ($NuitkaJobs -gt 0) {
     $script:BuildNuitkaJobs = [Math]::Min($script:LogicalProcessorCount, $NuitkaJobs)
 } else {
     $script:BuildNuitkaJobs = [Math]::Max(1, $script:PhysicalCoreCount)
@@ -89,18 +83,23 @@ $SessionLogStream = [System.IO.File]::Open(
 $script:SessionLogWriter = [System.IO.StreamWriter]::new($SessionLogStream, [System.Text.UTF8Encoding]::new($true))
 $script:SessionLogWriter.AutoFlush = $true
 
-# Intercept Ctrl+C instead of allowing the PowerShell host to abandon the
-# monitoring loop while detached Nuitka descendants keep compiling.
-$script:CancelHandler = [System.ConsoleCancelEventHandler]{
-    param($Sender, $EventArgs)
-    $EventArgs.Cancel = $true
-    $script:CancelRequested = $true
-}
-try {
-    [Console]::add_CancelKeyPress($script:CancelHandler)
-    Write-Host 'Build cancellation handler armed: Ctrl+C will stop the complete active build process tree.'
-} catch {
-    Write-Host ("WARNING: Could not register Ctrl+C handler: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+# Intercept Ctrl+C locally. GitHub Actions owns cancellation of hosted jobs;
+# registering a PowerShell scriptblock as a .NET console signal callback there
+# can be invoked without a PowerShell runspace during runner timeout/cancel.
+if ($env:GITHUB_ACTIONS -eq 'true') {
+    Write-Host 'GitHub Actions cancellation is managed by the runner; custom ConsoleCancelKeyPress callback is disabled.'
+} else {
+    $script:CancelHandler = [System.ConsoleCancelEventHandler]{
+        param($Sender, $EventArgs)
+        $EventArgs.Cancel = $true
+        $script:CancelRequested = $true
+    }
+    try {
+        [Console]::add_CancelKeyPress($script:CancelHandler)
+        Write-Host 'Build cancellation handler armed: Ctrl+C will stop the complete active build process tree.'
+    } catch {
+        Write-Host ("WARNING: Could not register Ctrl+C handler: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    }
 }
 
 function Write-LogLine([string]$Message) {
@@ -184,6 +183,13 @@ function Write-NativeOutputLine {
 
     $LogLine = if ($StreamName -eq 'STDERR') { '[STDERR] ' + $Line } else { '[STDOUT] ' + $Line }
     Write-LogLine $LogLine
+
+    # MSVC C1002 and SCons fatal messages are terminal build failures. Detect
+    # them while streaming output so orphaned Nuitka/compiler workers do not
+    # keep the runner alive until its global job timeout.
+    if ($NuitkaCompile -and $Line -match '(?i)(fatal error C1002:|fatal error C1001:|scons:\s+\*\*\*.*\bError\s+\d+|FATAL:\s+Failed unexpectedly in Scons C backend compilation)') {
+        $script:CompilerFatalErrorDetected = $true
+    }
 
     if ($NuitkaCompile -and $null -ne $ProgressState) {
         if ($Line -match 'Starting Python compilation') {
@@ -324,6 +330,10 @@ function Invoke-Native {
 
             Drain-NativeOutput -Reader $StdoutReader -StreamName 'STDOUT' -NuitkaCompile $NuitkaCompile -ProgressState $ProgressState
             Drain-NativeOutput -Reader $StderrReader -StreamName 'STDERR' -NuitkaCompile $NuitkaCompile -ProgressState $ProgressState
+
+            if ($NuitkaCompile -and $script:CompilerFatalErrorDetected) {
+                throw [System.InvalidOperationException]::new("Nuitka reported a fatal MSVC/SCons compilation error. Remaining build processes will be stopped. Full stdout/stderr is recorded in $LogPath")
+            }
 
             # Refresh the known process tree every 3 seconds. Keep previously
             # discovered PIDs even if an intermediate parent exits, otherwise
@@ -593,7 +603,11 @@ try {
     Write-LogLine 'BUILDER_FIX_MARKER: MAX_PERFORMANCE_PROCESS_TREE_MATHTEXT_20261105'
     Invoke-PendingBuildPowerRestore
     Write-LogLine "Build mode: $BuildMode"
-    Write-LogLine ("[PERFORMANCE] Nuitka native compilation will use --jobs={0} (physical cores detected: {1}, logical processors: {2}). Python analysis is a separate, mostly single-threaded phase and is not accelerated by --jobs." -f $script:BuildNuitkaJobs, $script:PhysicalCoreCount, $script:LogicalProcessorCount)
+    if ($LowMemory) {
+        Write-LogLine ("[MEMORY] Emergency Nuitka --low-memory mode is enabled (one compiler job). Detected physical cores: {0}; logical processors: {1}." -f $script:PhysicalCoreCount, $script:LogicalProcessorCount)
+    } else {
+        Write-LogLine ("[PARALLEL] Nuitka native compilation will use --jobs={0}. Detected physical cores: {1}; logical processors: {2}." -f $script:BuildNuitkaJobs, $script:PhysicalCoreCount, $script:LogicalProcessorCount)
+    }
     Write-LogLine '[PERFORMANCE] The currently active Windows power plan will not be changed by this build.'
     Write-LogLine "Project: $ProjectRoot"
     Write-LogLine "Started: $($script:BuildStartTime.ToString('yyyy-MM-dd HH:mm:ss.fff'))"
@@ -868,23 +882,24 @@ VSVersionInfo(
     [void]$NuitkaArgs.Add('--enable-plugin=pyqt6')
     [void]$NuitkaArgs.Add('--windows-console-mode=disable')
     [void]$NuitkaArgs.Add('--assume-yes-for-downloads')
-    # Fix for a confirmed, reproducible compiler crash (not a timing/thermal
-    # issue): MSVC's cl.exe fails with "fatal error C1002: compiler is out of
-    # heap space in pass 2" on the single enormous generated C file for
-    # google.genai.types (131,067 lines). Link-time optimization holds extra
-    # cross-module state in memory during code generation, which pushes this
-    # specific oversized file past cl.exe's per-process heap limit. Disabling
-    # LTO removes that extra memory pressure for this one file without
-    # removing the google.genai package or any of its functionality; it only
-    # turns off a compile-time inlining optimization, so the application
-    # behaves identically once built. This is a documented workaround for
-    # this exact Nuitka/MSVC error, not a guess.
+    # Force MSVC on Python 3.13+. Nuitka's MinGW64 backend is not supported
+    # for this Python version unless an experimental override is used; the
+    # local failure log shows Nuitka selecting MinGW and aborting in Scons.
+    [void]$NuitkaArgs.Add('--msvc=latest')
+    # Preserve two-job compilation in the normal GitHub workflow. Nuitka's
+    # --low-memory option implies --jobs=1, so it is added only when the user
+    # explicitly requests the emergency -LowMemory fallback.
+    if ($LowMemory) {
+        [void]$NuitkaArgs.Add('--low-memory')
+    } else {
+        [void]$NuitkaArgs.Add(("--jobs={0}" -f $script:BuildNuitkaJobs))
+    }
+    # Keep link-time optimization disabled to avoid an additional link-time
+    # memory peak. This does not by itself guarantee that C1002 will disappear.
     [void]$NuitkaArgs.Add('--lto=no')
-    # Intentionally keep Nuitka's main.build directory for faster subsequent rebuilds.
-    # Use a thermally-reasonable, empirically-tunable number of parallel compiler
-    # processes (see -NuitkaJobs / $script:BuildNuitkaJobs above) instead of
-    # unconditionally maxing out every logical processor.
-    [void]$NuitkaArgs.Add(("--jobs={0}" -f $script:BuildNuitkaJobs))
+    # Intentionally keep Nuitka's main.build directory for subsequent builds.
+    # The very first retry after this compiler change should use
+    # -CleanNuitkaWorkspace to discard stale MinGW/MSVC intermediate objects.
     [void]$NuitkaArgs.Add(('--output-dir={0}' -f $NuitkaWorkDir))
     [void]$NuitkaArgs.Add(('--output-filename={0}' -f $ExeName))
     [void]$NuitkaArgs.Add(('--windows-icon-from-ico={0}' -f $IconPath))
@@ -900,10 +915,10 @@ VSVersionInfo(
     [void]$NuitkaArgs.Add(('--include-data-files={0}=combo_chevron_up_dark.png' -f $ChevronUpDarkPath))
     [void]$NuitkaArgs.Add(('--include-data-files={0}=ENGO_PROGRAM_GUIDE.md' -f $GuidePath))
     # main.py was split into several local modules (engo_*.py). Nuitka compiles
-    # every Python module to its OWN C file, so these compile in parallel under
-    # --jobs (one giant main.py was a single C translation unit = one core).
-    # Standalone mode already follows their imports; listing them explicitly is
-    # a safety net so a module can never be silently left out of the build.
+    # every Python module to its OWN C file. Standalone mode already follows
+    # their imports; listing them explicitly is a safety net so a module can
+    # never be silently left out of the build. These C files are compiled in
+    # parallel according to --jobs, normally two jobs on GitHub Actions.
     $EngoModuleFiles = @(Get-ChildItem -LiteralPath $ProjectRoot -Filter 'engo_*.py' -File | Sort-Object Name)
     if ($EngoModuleFiles.Count -eq 0) { throw 'No engo_*.py modules were found next to main.py; the split project is incomplete.' }
     foreach ($EngoModuleFile in $EngoModuleFiles) {
@@ -1014,7 +1029,8 @@ except Exception as exc:
     [System.IO.File]::WriteAllText($NuitkaRunnerPath, $NuitkaRunnerSource, [System.Text.UTF8Encoding]::new($false))
     $NuitkaArgsJson = ConvertTo-Json -InputObject ([string[]]$NuitkaArgs.ToArray()) -Compress
     $NuitkaArgPayload = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($NuitkaArgsJson))
-    Write-LogLine ("[PERFORMANCE] Nuitka parallel jobs: {0} (physical cores: {1}, logical processors: {2}); persistent main.build and Nuitka's per-user compiler cache are retained; no processor cap or temporary power plan is applied." -f $script:BuildNuitkaJobs, $script:PhysicalCoreCount, $script:LogicalProcessorCount)
+    $CompilerMode = if ($LowMemory) { 'MSVC latest; --low-memory (one job)' } else { 'MSVC latest; parallel jobs' }
+    Write-LogLine ("[COMPILER] {0}; compiler jobs: {1}; LTO disabled. Physical cores: {2}; logical processors: {3}." -f $CompilerMode, $script:BuildNuitkaJobs, $script:PhysicalCoreCount, $script:LogicalProcessorCount)
     Invoke-Native -Executable $Python -Arguments @($NuitkaRunnerPath, $NuitkaArgPayload) -Label 'Compile Engo with Nuitka into a protected standalone build'
     if (-not (Test-Path -LiteralPath $NuitkaExePath)) {
         throw "Nuitka finished but the standalone executable was not found at $NuitkaExePath. Check the compilation report and build log."
