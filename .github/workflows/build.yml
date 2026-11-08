@@ -37,6 +37,34 @@ jobs:
           grep -Eq "^APP_VERSION[[:space:]]*=[[:space:]]*['\"][0-9]+\.[0-9]+\.[0-9]+" main.py
           ls engo_*.py
 
+  # Quick probe (~20-30 min): compiles ONLY google.genai.types with the same
+  # flags, so you know early whether the C1002 fix works.
+  genai-compile-probe:
+    needs: check
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          architecture: x64
+          check-latest: false
+
+      - name: Install Nuitka and google-genai
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install nuitka zstandard ordered-set google-genai
+
+      - name: Compile google.genai.types with /Od
+        shell: pwsh
+        env:
+          _CL_: /Od
+        run: |
+          "import google.genai.types`nprint('ok')" | Out-File probe.py -Encoding ascii
+          python -m nuitka --mode=standalone --msvc=latest --lto=no --jobs=2 --assume-yes-for-downloads --output-dir=out probe.py
+          .\out\probe.dist\probe.exe
+
   build:
     needs: check
     # Keep the same Windows Server 2025 / Visual Studio 2026 runner image
@@ -238,6 +266,10 @@ jobs:
         shell: pwsh
         env:
           ENGO_BUILD_PROFILE: ${{ steps.profile.outputs.build_profile }}
+          # Fix for C1002 (compiler out of heap space in pass 2) on the huge
+          # generated module.google.genai.types.c: _CL_ is appended AFTER
+          # Nuitka's /Ox, so /Od wins and the optimizer pass is skipped.
+          _CL_: /Od
         run: |
           Write-Host "Runner logical processors: $env:NUMBER_OF_PROCESSORS"
           Write-Host "Build profile: $env:ENGO_BUILD_PROFILE"
