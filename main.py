@@ -4160,6 +4160,9 @@ class MainWindow(QMainWindow):
             ("Ctrl+Shift+S", lambda: self.save_active(True)), ("Ctrl+F", self.open_pdf_search), ("F11", self.toggle_fullscreen),
             ("Ctrl+Shift+F", self.toggle_chat_focus_mode), ("Ctrl+Shift+B", self.toggle_toolbar_visibility),
             ("F5", self.toggle_presentation), ("Escape", self.exit_modes),
+            # Match the toolbar Translate button exactly: Insert starts the same
+            # PDF-region translation selection workflow as clicking the icon.
+            ("Insert", self.start_translate_selection),
             ("Ctrl+W", lambda: self.close_tab(self.tabs.currentIndex())),
             ("Ctrl+Tab", lambda: self._step_tab(1)), ("Ctrl+Shift+Tab", lambda: self._step_tab(-1)),
             ("Ctrl+Z", self.undo_active), ("Ctrl+Y", self.redo_active),
@@ -7503,6 +7506,8 @@ class MainWindow(QMainWindow):
         worker = AIRequestWorker(path, provider, model, api_key, question, history, include_context,
                                  selected_images, mode, current_page_index,
                                  supplemental_documents=supplemental_documents, pdf_snapshots=pdf_snapshots)
+        # Long Arabic + LaTeX explanations were cut at the default 2500-token output limit.
+        worker.max_output_tokens = 8192
         worker.streamed.connect(self._on_ai_delta)
         worker.succeeded.connect(self._on_ai_success)
         worker.failed.connect(self._on_ai_failure)
@@ -7576,7 +7581,11 @@ class MainWindow(QMainWindow):
     def _on_ai_failure(self, path, error):
         self._speak_next_response = False
         friendly = self._friendly_ai_error_message(error)
-        self.ai_panel.append_message_for(path, "assistant", f"{friendly}\n\n<details><summary>Technical details</summary>\n\n```text\n{str(error)[:1800]}\n```\n</details>")
+        # Raw HTML (<details>) is escaped by the chat renderer and Qt cannot collapse it, so it was shown as literal text.
+        # Use plain Markdown only: a bold label followed by a code block.
+        _is_ar = str(self.settings.value("interface_language", "en", type=str) or "en").lower().startswith("ar")
+        _details_label = "التفاصيل التقنية" if _is_ar else "Technical details"
+        self.ai_panel.append_message_for(path, "assistant", f"{friendly}\n\n**{_details_label}**\n\n```text\n{str(error)[:1800]}\n```")
         self.show_status("AI request failed · see the suggested fix in chat")
 
     def _on_ai_worker_finished(self):

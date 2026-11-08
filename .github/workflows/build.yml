@@ -1,91 +1,303 @@
-﻿name: Build Engo Setup
+name: Build Engo Setup
 
 on:
-  workflow_dispatch:   # manual "Run workflow" button in the Actions tab
+  workflow_dispatch:
   push:
     branches: [ main ]
     paths-ignore:
       - '**/*.md'
       - 'tools/**'
 
-# A newer push cancels the older build of the same branch (saves runner minutes).
+# Keep one active build per branch. A newer push may wait, but will not kill
+# an expensive MSVC compilation that is already running.
 concurrency:
   group: build-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
-  # Fast gate (~20 s, Linux): fail early on syntax errors in ANY split module
-  # before spending an hour on the native Windows build.
+  # Fast Linux gate: catch syntax/version mistakes before using Windows minutes.
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
-      - name: Syntax-check main.py and every engo_*.py
+          check-latest: false
+
+      - name: Syntax-check application modules
+        shell: bash
         run: |
           python -m py_compile main.py engo_*.py
-          grep -Eq '^APP_VERSION\s*=\s*["'"'"'][0-9]+\.[0-9]+\.[0-9]+' main.py
+          grep -Eq "^APP_VERSION[[:space:]]*=[[:space:]]*['\"][0-9]+\.[0-9]+\.[0-9]+" main.py
           ls engo_*.py
 
   build:
     needs: check
-    runs-on: windows-latest
+    # Keep the same Windows Server 2025 / Visual Studio 2026 runner image
+    # already used by the repository's previous windows-latest workflow.
+    runs-on: windows-2025
     timeout-minutes: 360
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python 3.13 x64
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.13'
           architecture: x64
+          check-latest: false
           cache: pip
           cache-dependency-path: |
             requirements.txt
             requirements-build.txt
 
-      - name: Install NSIS
-        run: choco install nsis -y --no-progress
-
-      - name: Install Python build dependencies
+      # The normal private runner has 2 CPUs / 8 GB RAM. It previously hit
+      # MSVC C1002 with two concurrent jobs, so use Nuitka's one-job low-memory
+      # mode there. Public standard runners have 4 CPUs / 16 GB and retain 2 jobs.
+      - name: Select build profile from actual runner resources
+        id: profile
+        shell: pwsh
         run: |
-          python -m pip install --disable-pip-version-check --upgrade pip wheel
-          python -m pip install --disable-pip-version-check -r requirements-build.txt
+          $Computer = Get-CimInstance Win32_ComputerSystem
+          $Logical = [int]$Computer.NumberOfLogicalProcessors
+          $RamGB = [math]::Round(([double]$Computer.TotalPhysicalMemory / 1GB), 1)
+          if (($RamGB -lt 12) -or ($Logical -lt 4)) {
+            $Profile = 'low-memory'
+            $Mode = 'Nuitka --low-memory (one compiler job)'
+          } else {
+            $Profile = 'balanced-2jobs'
+            $Mode = 'Nuitka --jobs=2'
+          }
 
-      # Reuse Nuitka's generated C/objects between runs. Each engo_*.py is its
-      # own C file, so after a normal commit only the modules that changed are
-      # recompiled; the unchanged ones (and third-party modules) come from cache.
-      - name: Restore Nuitka build cache
-        uses: actions/cache@v4
+          "build_profile=$Profile" >> $env:GITHUB_OUTPUT
+          Write-Host "Runner logical CPUs: $Logical"
+          Write-Host "Runner physical RAM: $RamGB GB"
+          Write-Host "Selected build mode: $Mode"
+          @(
+            '### Windows build profile',
+            "- Runner: **Windows Server 2025**",
+            "- Logical processors: **$Logical**",
+            "- Physical RAM: **$RamGB GB**",
+            "- Compiler profile: **$Mode**"
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      # Fail early if the required MSVC x64 toolset is absent. build_release.ps1
+      # explicitly passes --msvc=latest; this prevents a silent MinGW fallback.
+      - name: Verify Visual Studio MSVC x64 toolchain
+        id: msvc
+        shell: pwsh
+        run: |
+          $VsWhereCandidates = @(
+            (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'),
+            (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\Installer\vswhere.exe')
+          )
+          $VsWhereCommand = Get-Command 'vswhere.exe' -ErrorAction SilentlyContinue
+          $VsWhere = if ($VsWhereCommand) { $VsWhereCommand.Source } else { $VsWhereCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1 }
+          if (-not $VsWhere) { throw 'vswhere.exe was not found on the Windows runner.' }
+
+          $VsInstall = & $VsWhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1
+          if (-not $VsInstall -or -not (Test-Path -LiteralPath $VsInstall)) {
+            throw 'Visual Studio C++ x64 build tools (MSVC) are not installed on this runner.'
+          }
+
+          $MsvcRoot = Join-Path $VsInstall 'VC\Tools\MSVC'
+          $Toolset = Get-ChildItem -LiteralPath $MsvcRoot -Directory -ErrorAction Stop |
+            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+          if (-not $Toolset) { throw "No MSVC toolset directory was found under $MsvcRoot" }
+
+          $Cl = Join-Path $Toolset.FullName 'bin\Hostx64\x64\cl.exe'
+          if (-not (Test-Path -LiteralPath $Cl)) { throw "MSVC x64 compiler is missing: $Cl" }
+
+          "toolset_version=$($Toolset.Name)" >> $env:GITHUB_OUTPUT
+          Write-Host "Visual Studio: $VsInstall"
+          Write-Host "MSVC toolset: $($Toolset.Name)"
+          Write-Host "MSVC compiler verified: $Cl"
+
+      # Prepare the exact venv that build_release.ps1 will use. Installing here
+      # avoids the old workflow's duplicate global-Python + .build_venv installs
+      # and lets the cache key include the actual Python/Nuitka versions.
+      - name: Prepare isolated Python build environment
+        id: build-env
+        shell: pwsh
+        run: |
+          $Venv = Join-Path $env:GITHUB_WORKSPACE '.build_venv'
+          if (-not (Test-Path -LiteralPath (Join-Path $Venv 'Scripts\python.exe'))) {
+            python -m venv $Venv
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to create the Python 3.13 build virtual environment.' }
+          }
+
+          $Python = Join-Path $Venv 'Scripts\python.exe'
+          if (-not (Test-Path -LiteralPath $Python)) { throw "Build virtual environment Python was not created: $Python" }
+          & $Python -m pip install --disable-pip-version-check --upgrade pip wheel
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to update pip/wheel in .build_venv.' }
+          & $Python -m pip install --disable-pip-version-check -r requirements-build.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to install requirements-build.txt into .build_venv.' }
+          & $Python -m pip check
+          if ($LASTEXITCODE -ne 0) { throw 'pip check reported dependency conflicts in .build_venv.' }
+
+          $PythonVersion = & $Python -c "import sys; print('.'.join(map(str, sys.version_info[:3])))"
+          if ($LASTEXITCODE -ne 0 -or -not $PythonVersion) { throw 'Could not determine the build venv Python version.' }
+          $NuitkaVersion = & $Python -c "import importlib.metadata as m; print(m.version('Nuitka'))"
+          if ($LASTEXITCODE -ne 0 -or -not $NuitkaVersion) { throw 'Could not determine the installed Nuitka version.' }
+
+          "python_version=$PythonVersion" >> $env:GITHUB_OUTPUT
+          "nuitka_version=$NuitkaVersion" >> $env:GITHUB_OUTPUT
+          Write-Host "Build venv Python: $PythonVersion x64"
+          Write-Host "Nuitka version: $NuitkaVersion"
+
+      # Keep the same cache paths as the previous workflow so its existing
+      # Windows/MSVC cache can still be restored. main.dist is removed below
+      # before the disk check and again at the end, so it is not retained in new
+      # cache snapshots. main.build holds the incremental C/object intermediates.
+      - name: Restore Nuitka compiler cache
+        id: nuitka-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             build\nuitka
             ~\AppData\Local\Nuitka
-          key: nuitka-${{ runner.os }}-py313-msvc-2jobs-${{ hashFiles('requirements.txt', 'requirements-build.txt', 'build_release.ps1') }}-${{ github.sha }}
+          key: engo-nuitka-${{ runner.os }}-win25-py${{ steps.build-env.outputs.python_version }}-nuitka${{ steps.build-env.outputs.nuitka_version }}-msvc${{ steps.msvc.outputs.toolset_version }}-${{ steps.profile.outputs.build_profile }}-${{ hashFiles('requirements.txt', 'requirements-build.txt', 'build_release.ps1', '.github/workflows/build.yml') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            engo-nuitka-${{ runner.os }}-win25-py${{ steps.build-env.outputs.python_version }}-nuitka${{ steps.build-env.outputs.nuitka_version }}-msvc${{ steps.msvc.outputs.toolset_version }}-${{ steps.profile.outputs.build_profile }}-${{ hashFiles('requirements.txt', 'requirements-build.txt', 'build_release.ps1', '.github/workflows/build.yml') }}-
             nuitka-${{ runner.os }}-py313-msvc-2jobs-${{ hashFiles('requirements.txt', 'requirements-build.txt', 'build_release.ps1') }}-
 
-      - name: Build with build_release.ps1 (MSVC, parallel 2 compiler jobs)
+      - name: Remove stale output and protect workspace disk space
         shell: pwsh
         run: |
-          Write-Host "Logical processors: $env:NUMBER_OF_PROCESSORS"
-          Write-Host "Nuitka compiler jobs: 2 (parallel C compilation)"
-          .\build_release.ps1 -BuildMode FULL -SkipOptionalPyAudio -NuitkaJobs 2
+          $Workspace = $env:GITHUB_WORKSPACE
+          $NuitkaRoot = Join-Path $Workspace 'build\nuitka'
+          $StaleDist = Join-Path $NuitkaRoot 'main.dist'
+          if (Test-Path -LiteralPath $StaleDist) {
+            $Size = (Get-ChildItem -LiteralPath $StaleDist -File -Recurse -ErrorAction SilentlyContinue |
+              Measure-Object -Property Length -Sum).Sum
+            $SizeGB = [math]::Round(([double]$Size / 1GB), 2)
+            Write-Host "Removing stale main.dist restored from cache ($SizeGB GB)."
+            Remove-Item -LiteralPath $StaleDist -Recurse -Force
+          }
+
+          $WorkspaceDrive = [System.IO.Path]::GetPathRoot($Workspace).TrimEnd('\').TrimEnd(':')
+          $Drive = Get-PSDrive -Name $WorkspaceDrive -PSProvider FileSystem -ErrorAction Stop
+          $FreeGB = [math]::Round(([double]$Drive.Free / 1GB), 2)
+          Write-Host "Workspace free space after stale-output cleanup: $FreeGB GB"
+
+          # A restored main.build cache is helpful only if it leaves the runner's
+          # required 12 GB safety margin. Drop generated cache data, not source,
+          # when that margin would otherwise be violated.
+          $CachedBuild = Join-Path $NuitkaRoot 'main.build'
+          if (($FreeGB -lt 12) -and (Test-Path -LiteralPath $CachedBuild)) {
+            $CacheSize = (Get-ChildItem -LiteralPath $CachedBuild -File -Recurse -ErrorAction SilentlyContinue |
+              Measure-Object -Property Length -Sum).Sum
+            Write-Warning ("Discarding restored main.build cache ({0:N2} GB) to recover workspace space." -f ([double]$CacheSize / 1GB))
+            Remove-Item -LiteralPath $CachedBuild -Recurse -Force
+            $Drive = Get-PSDrive -Name $WorkspaceDrive -PSProvider FileSystem -ErrorAction Stop
+            $FreeGB = [math]::Round(([double]$Drive.Free / 1GB), 2)
+            Write-Host "Workspace free space after dropping compiler cache: $FreeGB GB"
+          }
+
+          if ($FreeGB -lt 12) {
+            throw "Only $FreeGB GB is free on the workspace drive; build_release.ps1 requires at least 12 GB."
+          }
+
+      - name: Ensure NSIS is available
+        shell: pwsh
+        run: |
+          $NsisCandidates = @(
+            (Join-Path $env:ProgramFiles 'NSIS\makensis.exe'),
+            (Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'),
+            (Join-Path $env:ProgramFiles 'NSIS\Bin\makensis.exe'),
+            (Join-Path ${env:ProgramFiles(x86)} 'NSIS\Bin\makensis.exe')
+          )
+          $NsisCommand = Get-Command 'makensis.exe' -ErrorAction SilentlyContinue
+          $Nsis = if ($NsisCommand) { $NsisCommand.Source } else { $NsisCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1 }
+
+          if (-not $Nsis) {
+            if (-not (Get-Command 'choco.exe' -ErrorAction SilentlyContinue)) {
+              throw 'NSIS is not installed and Chocolatey is unavailable on this runner.'
+            }
+            choco install nsis --yes --no-progress --limit-output
+            if ($LASTEXITCODE -ne 0) { throw "Chocolatey failed to install NSIS (exit $LASTEXITCODE)." }
+            $NsisCommand = Get-Command 'makensis.exe' -ErrorAction SilentlyContinue
+            $Nsis = if ($NsisCommand) { $NsisCommand.Source } else { $NsisCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1 }
+          }
+
+          if (-not $Nsis) { throw 'NSIS installation completed but makensis.exe could not be located.' }
+          Write-Host "NSIS compiler: $Nsis"
+          & $Nsis /VERSION
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS version check failed.' }
+
+      # Reuse the already prepared .build_venv; do not install dependencies
+      # again inside build_release.ps1. setup-python caches pip downloads.
+      - name: Build Engo with MSVC
+        shell: pwsh
+        env:
+          ENGO_BUILD_PROFILE: ${{ steps.profile.outputs.build_profile }}
+        run: |
+          Write-Host "Runner logical processors: $env:NUMBER_OF_PROCESSORS"
+          Write-Host "Build profile: $env:ENGO_BUILD_PROFILE"
+          if ($env:ENGO_BUILD_PROFILE -eq 'low-memory') {
+            Write-Host 'Using Nuitka low-memory mode (one compiler job) for the 8 GB / 2 CPU runner.'
+            .\build_release.ps1 -BuildMode FULL -Compiler MSVC -SkipDependencyInstall -SkipOptionalPyAudio -LowMemory
+          } else {
+            Write-Host 'Using two Nuitka compiler jobs on the 16 GB / 4 CPU runner.'
+            .\build_release.ps1 -BuildMode FULL -Compiler MSVC -SkipDependencyInstall -SkipOptionalPyAudio -NuitkaJobs 2
+          }
 
       - name: Upload installer artifact
-        uses: actions/upload-artifact@v4
+        if: success()
+        uses: actions/upload-artifact@v7
         with:
           name: Engo_Setup
           path: dist\Engo_Setup_v*.exe
           if-no-files-found: error
+          # NSIS already creates a compressed installer; do not spend more CPU
+          # recompressing that single file into the artifact ZIP.
+          compression-level: 0
+          retention-days: 14
 
       - name: Upload build logs (on failure)
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Engo_Build_Logs
           path: build_logs\
           if-no-files-found: ignore
+          compression-level: 3
+          retention-days: 7
+
+      # Do not cache the standalone distribution: it is disposable and large.
+      # Keep main.build and the Nuitka download cache for incremental retries.
+      - name: Clean standalone staging output but retain compiler cache
+        if: always()
+        shell: pwsh
+        run: |
+          $StaleDist = Join-Path $env:GITHUB_WORKSPACE 'build\nuitka\main.dist'
+          if (Test-Path -LiteralPath $StaleDist) {
+            try {
+              Remove-Item -LiteralPath $StaleDist -Recurse -Force -ErrorAction Stop
+              Write-Host 'Removed disposable main.dist; retained main.build for the next cached build.'
+            } catch {
+              Write-Warning ("Could not remove main.dist during final cleanup: {0}" -f $_.Exception.Message)
+            }
+          } else {
+            Write-Host 'No standalone staging output to clean.'
+          }
+
+      # Save completed intermediates even when the native build failed. This
+      # makes a retry of the same commit able to reuse successfully compiled
+      # modules instead of starting from an empty compiler workspace.
+      - name: Save Nuitka compiler cache for the next run
+        if: always() && steps.nuitka-cache.outcome == 'success' && steps.nuitka-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            build\nuitka
+            ~\AppData\Local\Nuitka
+          key: ${{ steps.nuitka-cache.outputs.cache-primary-key }}

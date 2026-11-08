@@ -5,6 +5,10 @@ param(
     [switch]$SkipOptionalPyAudio,
     [switch]$CleanNuitkaWorkspace,
     [ValidateSet('FULL','FAST')][string]$BuildMode = 'FULL',
+    # Keep MSVC as the default (GitHub Actions). Local builds can explicitly select Zig.
+    [ValidateSet('MSVC','ZIG')][string]$Compiler = 'MSVC',
+    # Optional full path to zig.exe; if omitted, PATH and common install paths are searched.
+    [string]$ZigPath = '',
     # Limit the number of parallel native C compiler jobs. The GitHub workflow
     # explicitly passes 2 so the normal hosted build remains a two-job build.
     # Locally, 0 (default) selects the detected physical core count.
@@ -332,7 +336,7 @@ function Invoke-Native {
             Drain-NativeOutput -Reader $StderrReader -StreamName 'STDERR' -NuitkaCompile $NuitkaCompile -ProgressState $ProgressState
 
             if ($NuitkaCompile -and $script:CompilerFatalErrorDetected) {
-                throw [System.InvalidOperationException]::new("Nuitka reported a fatal MSVC/SCons compilation error. Remaining build processes will be stopped. Full stdout/stderr is recorded in $LogPath")
+                throw [System.InvalidOperationException]::new("Nuitka reported a fatal native compiler/SCons compilation error. Remaining build processes will be stopped. Full stdout/stderr is recorded in $LogPath")
             }
 
             # Refresh the known process tree every 3 seconds. Keep previously
@@ -638,12 +642,16 @@ try {
         Write-LogLine "Windows registry version lookup unavailable: $($_.Exception.Message)"
         Write-LogLine "Windows version fallback: $([Environment]::OSVersion.VersionString)"
     }
-    Write-LogLine "Build flags: InstallAfterBuild=$InstallAfterBuild; SkipDependencyInstall=$SkipDependencyInstall; SkipOptionalPyAudio=$SkipOptionalPyAudio; CleanNuitkaWorkspace=$CleanNuitkaWorkspace"
+    Write-LogLine "Build flags: InstallAfterBuild=$InstallAfterBuild; SkipDependencyInstall=$SkipDependencyInstall; SkipOptionalPyAudio=$SkipOptionalPyAudio; CleanNuitkaWorkspace=$CleanNuitkaWorkspace; Compiler=$Compiler"
     Write-LogLine "Stage log: $LogPath"
     Write-LogLine "Session log: $SessionLogPath"
 
     $MainPath = Join-Path $ProjectRoot 'main.py'
-    $RequirementsPath = Join-Path $ProjectRoot 'requirements-build.txt'
+    if ($Compiler -eq 'ZIG') {
+        $RequirementsPath = Join-Path $ProjectRoot 'requirements-build-zig.txt'
+    } else {
+        $RequirementsPath = Join-Path $ProjectRoot 'requirements-build.txt'
+    }
     $IconPath = Join-Path $ProjectRoot 'engopdfviewer.ico'
     $CheckboxPath = Join-Path $ProjectRoot 'checkbox_checked.png'
     $ChevronPath = Join-Path $ProjectRoot 'combo_chevron_light.png'
@@ -679,12 +687,13 @@ try {
 
     $DistDir = Join-Path $ProjectRoot 'dist'
     $AppDistDir = Join-Path $DistDir $AppName
+    $CompilerWorkspaceName = if ($Compiler -eq 'ZIG') { 'nuitka_zig' } else { 'nuitka' }
     if ([string]::IsNullOrWhiteSpace($env:ENGO_BUILD_TEMP_DIR)) {
-        $NuitkaWorkDir = Join-Path $ProjectRoot 'build\nuitka'
+        $NuitkaWorkDir = Join-Path $ProjectRoot ("build\$CompilerWorkspaceName")
     } else {
         $ExternalBuildTemp = [Environment]::ExpandEnvironmentVariables($env:ENGO_BUILD_TEMP_DIR.Trim())
-        $NuitkaWorkDir = Join-Path $ExternalBuildTemp 'Engo_Nuitka'
-        Write-LogLine "Using external Nuitka work directory from ENGO_BUILD_TEMP_DIR: $NuitkaWorkDir"
+        $NuitkaWorkDir = Join-Path $ExternalBuildTemp ("Engo_Nuitka_$Compiler")
+        Write-LogLine "Using external build directory for $Compiler from ENGO_BUILD_TEMP_DIR: $NuitkaWorkDir"
     }
     # Keep Nuitka's intermediate build folder between runs. This is required
     # for useful incremental rebuilds and compiler-cache reuse. Only remove it
@@ -766,6 +775,45 @@ try {
 
     Write-LogLine "Python selected: $Python"
     Write-LogLine "Python runtime was newly created: $NeedNewVenv"
+
+    $ResolvedZigExe = $null
+    if ($Compiler -eq 'ZIG') {
+        Write-LogLine '[STAGE START] Locate and validate Zig compiler'
+        $ZigCandidates = @()
+        if (-not [string]::IsNullOrWhiteSpace($ZigPath)) { $ZigCandidates += $ZigPath.Trim('"') }
+        if (-not [string]::IsNullOrWhiteSpace($env:ZIG_EXE)) { $ZigCandidates += $env:ZIG_EXE.Trim('"') }
+        $ZigCommand = Get-Command 'zig.exe' -ErrorAction SilentlyContinue
+        if ($ZigCommand -and $ZigCommand.Source) { $ZigCandidates += $ZigCommand.Source }
+        $ZigCandidates += @('C:\Tools\zig\zig.exe', (Join-Path $ProjectRoot 'tools\zig\zig.exe'))
+        if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+            $ZigCandidates += (Join-Path $env:LOCALAPPDATA 'Programs\zig\zig.exe')
+        }
+        foreach ($ZigCandidate in $ZigCandidates) {
+            if ([string]::IsNullOrWhiteSpace([string]$ZigCandidate)) { continue }
+            $CandidatePath = [Environment]::ExpandEnvironmentVariables([string]$ZigCandidate)
+            if (Test-Path -LiteralPath $CandidatePath -PathType Container) {
+                $CandidatePath = Join-Path $CandidatePath 'zig.exe'
+            }
+            if (Test-Path -LiteralPath $CandidatePath -PathType Leaf) {
+                $ResolvedZigExe = (Resolve-Path -LiteralPath $CandidatePath).Path
+                break
+            }
+        }
+        if (-not $ResolvedZigExe) {
+            throw 'Zig was selected but zig.exe was not found. Extract the official Windows x86_64 ZIP to C:\Tools\zig, or pass -ZigPath with the full path to zig.exe.'
+        }
+        $ZigDirectory = Split-Path -Parent $ResolvedZigExe
+        if (($env:PATH -split ';') -notcontains $ZigDirectory) { $env:PATH = $ZigDirectory + ';' + $env:PATH }
+        $ZigVersionText = (& $ResolvedZigExe version 2>&1 | Out-String).Trim()
+        $ZigExitCode = $LASTEXITCODE
+        if ($ZigExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($ZigVersionText)) {
+            throw "Zig compiler could not run successfully: $ResolvedZigExe"
+        }
+        Write-LogLine "[ZIG] Executable: $ResolvedZigExe"
+        Write-LogLine "[ZIG] Version: $ZigVersionText"
+        Write-LogLine '[STAGE END] Locate and validate Zig compiler'
+    }
+
     Write-LogLine '[STAGE START] Install or reuse Python build dependencies'
     if ((-not $SkipDependencyInstall) -or $NeedNewVenv) {
         Invoke-Native $Python @('-m','pip','install','--disable-pip-version-check','--upgrade','pip','wheel') 'Update build tooling'
@@ -774,6 +822,15 @@ try {
         Write-LogLine '[SKIPPED] Dependency installation disabled by FAST build mode; existing .build_venv is reused.'
     }
     Write-LogLine '[STAGE END] Install or reuse Python build dependencies'
+
+    if ($Compiler -eq 'ZIG') {
+        Write-LogLine '[STAGE START] Ensure Nuitka 4.x Zig backend'
+        # The existing requirements-build.txt deliberately stays on Nuitka 2.x for the
+        # unchanged MSVC GitHub workflow. Zig+Python 3.13 needs the newer supported backend.
+        Invoke-Native $Python @('-m','pip','install','--disable-pip-version-check','--upgrade','Nuitka>=4.1,<5') 'Install Nuitka 4.x with supported Zig backend'
+        Invoke-Native $Python @('-m','nuitka','--version') 'Verify installed Nuitka Zig-capable version'
+        Write-LogLine '[STAGE END] Ensure Nuitka 4.x Zig backend'
+    }
 
     Write-LogLine '[STAGE START] Check/install optional PyAudio package'
     if (-not $SkipOptionalPyAudio) {
@@ -882,10 +939,13 @@ VSVersionInfo(
     [void]$NuitkaArgs.Add('--enable-plugin=pyqt6')
     [void]$NuitkaArgs.Add('--windows-console-mode=disable')
     [void]$NuitkaArgs.Add('--assume-yes-for-downloads')
-    # Force MSVC on Python 3.13+. Nuitka's MinGW64 backend is not supported
-    # for this Python version unless an experimental override is used; the
-    # local failure log shows Nuitka selecting MinGW and aborting in Scons.
-    [void]$NuitkaArgs.Add('--msvc=latest')
+    if ($Compiler -eq 'ZIG') {
+        # Zig supports 64-bit Windows Python 3.13+ in current Nuitka 4.x releases.
+        [void]$NuitkaArgs.Add('--zig')
+    } else {
+        # Keep the default GitHub Actions/MSVC path unchanged.
+        [void]$NuitkaArgs.Add('--msvc=latest')
+    }
     # Preserve two-job compilation in the normal GitHub workflow. Nuitka's
     # --low-memory option implies --jobs=1, so it is added only when the user
     # explicitly requests the emergency -LowMemory fallback.
@@ -1029,7 +1089,9 @@ except Exception as exc:
     [System.IO.File]::WriteAllText($NuitkaRunnerPath, $NuitkaRunnerSource, [System.Text.UTF8Encoding]::new($false))
     $NuitkaArgsJson = ConvertTo-Json -InputObject ([string[]]$NuitkaArgs.ToArray()) -Compress
     $NuitkaArgPayload = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($NuitkaArgsJson))
-    $CompilerMode = if ($LowMemory) { 'MSVC latest; --low-memory (one job)' } else { 'MSVC latest; parallel jobs' }
+    $CompilerMode = if ($Compiler -eq 'ZIG') { 'Zig' } else { 'MSVC latest' }
+    if ($LowMemory) { $CompilerMode += '; --low-memory (one job)' } else { $CompilerMode += '; parallel jobs' }
+    if ($Compiler -eq 'ZIG') { $CompilerMode += "; executable: $ResolvedZigExe" }
     Write-LogLine ("[COMPILER] {0}; compiler jobs: {1}; LTO disabled. Physical cores: {2}; logical processors: {3}." -f $CompilerMode, $script:BuildNuitkaJobs, $script:PhysicalCoreCount, $script:LogicalProcessorCount)
     Invoke-Native -Executable $Python -Arguments @($NuitkaRunnerPath, $NuitkaArgPayload) -Label 'Compile Engo with Nuitka into a protected standalone build'
     if (-not (Test-Path -LiteralPath $NuitkaExePath)) {
