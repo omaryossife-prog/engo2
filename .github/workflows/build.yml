@@ -264,6 +264,10 @@ jobs:
       # again inside build_release.ps1. setup-python caches pip downloads.
       - name: Build Engo with MSVC
         shell: pwsh
+        # If anything hangs, fail THIS step at 270 min instead of letting the whole
+        # job hit its 360 min limit. The always() cache-save step below then still
+        # runs, so the compiled C objects are never lost.
+        timeout-minutes: 270
         env:
           ENGO_BUILD_PROFILE: ${{ steps.profile.outputs.build_profile }}
           # Fix for C1002 (compiler out of heap space in pass 2) on the huge
