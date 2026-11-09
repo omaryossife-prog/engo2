@@ -1,0 +1,221 @@
+--- a/main.py
++++ b/main.py
+@@ -4527,10 +4527,22 @@
+                 self._on_translate_region_selected(t, page_index, data, clip, selected_text))
+ 
+     def _detach_document_tab(self, tab):
+-        """Remove a live document widget from this window without closing its PDF."""
++        """Remove a live document widget from this window without closing its PDF.
++
++        This is a MOVE operation, not a close operation.  The DocumentTab must
++        remain alive so the destination window can adopt the exact same widget
++        and preserve its loaded document, page, zoom, annotations and history.
++        """
+         index = self.tabs.indexOf(tab)
+         if index < 0:
+             return False
++        # Stop drag polling and discard any references held by the source tabbar
++        # before the widget is removed/reparented.  Otherwise paintEvent can try
++        # to query a QWidget that has already been destroyed by another path.
++        try:
++            self.doc_tabbar.forget_tab(tab)
++        except (AttributeError, RuntimeError):
++            pass
+         old_current = self.doc_tabbar.currentIndex()
+         self._unlink_document_relationships(tab)
+         for signal in (tab.currentPageChanged, tab.documentChanged, tab.titleChanged,
+@@ -4555,13 +4567,11 @@
+         finally:
+             self.doc_tabbar.blockSignals(bar_blocked)
+             self.tabs.blockSignals(stack_blocked)
+-        # This path permanently closes the tab; do not detach it with
+-        # setParent(None), which briefly turns the live document widget into a
+-        # top-level QWidgetWindow before Qt destroys it. That transient native
+-        # window can trigger "QWidgetWindow ... must be a top level window" on
+-        # Windows during subsequent popup/window processing.
+-        tab.hide()
+-        tab.deleteLater()
++        # QStackedWidget.removeWidget() hides the widget but deliberately does
++        # not destroy it.  Do NOT call deleteLater() here: _adopt_document_tab()
++        # in the receiving window reparents and inserts this same live widget.
++        # Also avoid setParent(None), which can briefly create a native
++        # QWidgetWindow on Windows while the tab is between its two stacks.
+         if self.tabs.count():
+             selected = min(max(0, old_current), self.tabs.count() - 1)
+             self.doc_tabbar.setCurrentIndex(selected)
+@@ -8533,6 +8543,13 @@
+         stack_blocker = QSignalBlocker(self.tabs)
+         for current_index, target in sorted(indexed, key=lambda pair: pair[0], reverse=True):
+             if isinstance(target, DocumentTab):
++                # A close can race with the tabbar's drag-paint timer.  Clear
++                # references before close_document()/deleteLater() invalidate
++                # the underlying C++ QWidget.
++                try:
++                    self.doc_tabbar.forget_tab(target)
++                except (AttributeError, RuntimeError):
++                    pass
+                 target.close_document()
+             self.tabs.removeWidget(target)
+             if target in self._tab_order:
+--- a/engo_app_dialogs.py
++++ b/engo_app_dialogs.py
+@@ -97,12 +97,31 @@
+         self._drop_insert_index = None
+         self.update()
+ 
++    def forget_tab(self, tab):
++        """Forget drag references before a tab is moved or permanently closed."""
++        if tab is None:
++            return
++        if self._pressed_tab is tab or self._link_target_tab is tab:
++            self._clear_press_state()
++            return
++        self._press_tab_rects.pop(tab, None)
++        self.update()
++
++    def _safe_tab_index(self, tab):
++        """Return a tab index without allowing deleted Qt wrappers to break paint."""
++        if tab is None:
++            return -1
++        try:
++            return self.owner.tabs.indexOf(tab)
++        except (RuntimeError, TypeError):
++            return -1
++
+     def _insertion_target_for_position(self, pos):
+         """Return the real tab-order insertion index and the visible green marker x."""
+         visible = []
+         order_without_source = [tab for tab in self.owner._tab_order if tab is not self._pressed_tab]
+         for tab in order_without_source:
+-            index = self.owner.tabs.indexOf(tab)
++            index = self._safe_tab_index(tab)
+             if index < 0 or index >= self.count() or not self.isTabVisible(index):
+                 continue
+             rect = self.tabRect(index)
+@@ -138,7 +157,7 @@
+ 
+     def _begin_tearoff(self, global_pos):
+         tab = self._pressed_tab
+-        if tab is None or self.owner.tabs.indexOf(tab) < 0:
++        if tab is None or self._safe_tab_index(tab) < 0:
+             self._clear_press_state()
+             return
+         self._clear_press_state()
+@@ -165,10 +184,13 @@
+     def _find_link_target(self, pos):
+         """Only the central 60% of another visible tab is a link drop zone."""
+         source_tab = self._pressed_tab
+-        if source_tab is None or not self.rect().contains(pos):
++        if source_tab is None or self._safe_tab_index(source_tab) < 0 or not self.rect().contains(pos):
+             return None
+-        for index, candidate in enumerate(self.owner._tab_order):
+-            if candidate is source_tab or index >= self.count() or not self.isTabVisible(index):
++        for candidate in self.owner._tab_order:
++            if candidate is source_tab:
++                continue
++            index = self._safe_tab_index(candidate)
++            if index < 0 or index >= self.count() or not self.isTabVisible(index):
+                 continue
+             rect = self.tabRect(index)
+             if rect.isNull() or not rect.contains(pos):
+@@ -182,41 +204,55 @@
+         super().paintEvent(event)
+         if not self._drag_active and self._external_link_target_index < 0 and self._drop_indicator_x is None:
+             return
++
++        # A QTabBar may receive a queued repaint after a document has been
++        # closed or moved to another window.  Never let an invalid PyQt wrapper
++        # escape from paintEvent; that would also skip QPainter.end().
++        source_index = self._safe_tab_index(self._pressed_tab)
++        target_index = self._safe_tab_index(self._link_target_tab)
++        if self._pressed_tab is not None and source_index < 0:
++            self._clear_press_state()
++            source_index = -1
++            target_index = -1
++        elif self._link_target_tab is not None and target_index < 0:
++            self._link_target_tab = None
++
+         painter = QPainter(self)
+-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+-        green = QColor(39, 190, 112)
+-        source_index = self.owner.tabs.indexOf(self._pressed_tab) if self._pressed_tab is not None else -1
+-        target_indices = set()
+-        if self._link_target_tab is not None:
+-            idx = self.owner.tabs.indexOf(self._link_target_tab)
+-            if idx >= 0:
+-                target_indices.add(idx)
+-        if self._external_link_target_index >= 0:
+-            target_indices.add(self._external_link_target_index)
+-        if source_index >= 0:
+-            source_rect = self.tabRect(source_index).adjusted(2, 2, -2, -2)
+-            painter.setPen(QPen(QColor(39, 190, 112, 190), 2))
+-            painter.setBrush(QColor(39, 190, 112, 32))
+-            painter.drawRoundedRect(source_rect, 7, 7)
+-        for idx in target_indices:
+-            if not (0 <= idx < self.count()):
+-                continue
+-            target_rect = self.tabRect(idx).adjusted(2, 2, -2, -2)
+-            painter.setPen(QPen(green, 2))
+-            painter.setBrush(QColor(39, 190, 112, 82))
+-            painter.drawRoundedRect(target_rect, 7, 7)
+-            painter.setPen(QColor(205, 255, 224))
+-            painter.drawText(target_rect.adjusted(4, 0, -7, 0),
+-                             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+-                             "🔗")
+-        if self._drop_indicator_x is not None and self._link_target_tab is None:
+-            x = int(self._drop_indicator_x)
+-            painter.setPen(Qt.PenStyle.NoPen)
+-            painter.setBrush(QColor(39, 190, 112, 65))
+-            painter.drawRoundedRect(QRectF(x - 5, 3, 10, max(8, self.height() - 6)), 5, 5)
+-            painter.setBrush(QColor(72, 235, 145))
+-            painter.drawRoundedRect(QRectF(x - 2, 2, 4, max(10, self.height() - 4)), 2, 2)
+-        painter.end()
++        if not painter.isActive():
++            return
++        try:
++            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
++            green = QColor(39, 190, 112)
++            target_indices = set()
++            if target_index >= 0:
++                target_indices.add(target_index)
++            if self._external_link_target_index >= 0:
++                target_indices.add(self._external_link_target_index)
++            if source_index >= 0:
++                source_rect = self.tabRect(source_index).adjusted(2, 2, -2, -2)
++                painter.setPen(QPen(QColor(39, 190, 112, 190), 2))
++                painter.setBrush(QColor(39, 190, 112, 32))
++                painter.drawRoundedRect(source_rect, 7, 7)
++            for idx in target_indices:
++                if not (0 <= idx < self.count()):
++                    continue
++                target_rect = self.tabRect(idx).adjusted(2, 2, -2, -2)
++                painter.setPen(QPen(green, 2))
++                painter.setBrush(QColor(39, 190, 112, 82))
++                painter.drawRoundedRect(target_rect, 7, 7)
++                painter.setPen(QColor(205, 255, 224))
++                painter.drawText(target_rect.adjusted(4, 0, -7, 0),
++                                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
++                                 "🔗")
++            if self._drop_indicator_x is not None and self._link_target_tab is None:
++                x = int(self._drop_indicator_x)
++                painter.setPen(Qt.PenStyle.NoPen)
++                painter.setBrush(QColor(39, 190, 112, 65))
++                painter.drawRoundedRect(QRectF(x - 5, 3, 10, max(8, self.height() - 6)), 5, 5)
++                painter.setBrush(QColor(72, 235, 145))
++                painter.drawRoundedRect(QRectF(x - 2, 2, 4, max(10, self.height() - 4)), 2, 2)
++        finally:
++            painter.end()
+ 
+     def mouseMoveEvent(self, event):
+         if self._pressed_tab is not None and (event.buttons() & Qt.MouseButton.LeftButton):
+@@ -266,8 +302,8 @@
+             self._clear_press_state()
+             return
+ 
+-        source_index = self.owner.tabs.indexOf(source_tab) if source_tab is not None else -1
+-        target_index = self.owner.tabs.indexOf(target_tab) if target_tab is not None else -1
++        source_index = self._safe_tab_index(source_tab)
++        target_index = self._safe_tab_index(target_tab)
+         if source_index >= 0 and target_index >= 0 and source_index != target_index:
+             self._clear_press_state()
+             self.owner._link_tabs_in_window(source_index, target_index)

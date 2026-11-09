@@ -429,6 +429,9 @@ class GeminiLiveTutorWorker(QThread):
         # because audio could be generated far ahead of what the user had actually heard.
         # Backpressure still prevents dropping PCM chunks and chopping sentences.
         self._speaker_queue: queue.Queue[bytes] = queue.Queue(maxsize=12)
+        # Track queued and currently playing voice output so the UI can clear focus
+        # only after the spoken explanation has actually finished.
+        self._speaker_playing_event = threading.Event()
         self._page_update_queue: queue.Queue[tuple[int, str, bytes, str | None]] = queue.Queue(maxsize=4)
         self._secondary_page_update_queue: queue.Queue[tuple[int, str, bytes, int]] = queue.Queue(maxsize=2)
         # Compact memory of pages already visited in this live conversation, so follow-up
@@ -1038,7 +1041,7 @@ class GeminiLiveTutorWorker(QThread):
             "COMPREHENSION CHECK LOOP (MANDATORY, BUT NOT AFTER EVERY SMALL STEP): Keep one complete problem together. While solving it, explain its setup, formulas, substitutions, calculations, algebra, and conclusion in a continuous flow; do NOT ask whether the learner understands after each line, equation, transformation, paragraph, or focus-rectangle move. If a question has clearly labeled independent parts (for example a, b, c), finish one whole labeled part before asking; then wait before starting the next labeled part. Likewise, finish a complete problem or a distinct section/concept before asking and moving to another problem/topic/section. Use natural Egyptian Arabic for one brief check, such as 'كده المسألة/الجزء ده واضح؟'. Then STOP and WAIT. If the learner says yes, proceed to the next complete unit. If they say no, ask which exact point is unclear, wait, and re-explain only that point differently with a small example; check again after the re-explanation. Do not repeat the check during the same uninterrupted explanation. At the end of all page content, ask one separate page-wide check (for example 'كده الصفحة كلها بقت واضحة؟') and WAIT. Only after an explicit yes to that final page-wide check may you call finish_page_lesson. Never say the page/lesson is complete before that confirmation.\n\n"
             "VOICE LESSON VISUAL POLICY: During voice lessons, NEVER draw or request arrows, pointers, marks, captions, text boxes, or other page annotations. Use ONLY the movable focus rectangle to show the item currently being explained.\n\n"
             "TRANSCRIPT FORMATTING: Write every textual answer and teaching explanation as clean, valid GitHub-Flavored Markdown so the Engo transcript can render it (ordinary paragraphs are valid Markdown). Use **bold** for important terms, headings and bullets only when useful, and numbered lists for ordered steps. Format equations with readable mathematical notation; never expose raw formatting characters such as unmatched underscores, asterisks, dollar-sign math delimiters, or backticks as decoration. Do not say Markdown symbols aloud. Keep the spoken explanation natural and make the displayed text concise and readable.\n\n"
-            "VISUAL FOCUS: The current full-page image may have a faint 10%-coordinate grid. Every box maps to the full current page, not the overview montage. If selectable text-block geometry is supplied, use the exact matching box for printed text/equations instead of guessing. First classify the semantic content: printed text and handwritten words/equations are text; a handwritten sketch, plotted chart, diagram, photo or real graphic is visual content. Visual graphics use a cyan rectangle, worked solutions use green, and all writing (including handwriting) uses amber. No laser dot or floating caption is shown. Do not draw arrows or any other page markup during the voice lesson; use only the focus rectangle. AUTOMATIC LESSON: plan in top-to-bottom reading order and cover all important items. MANDATORY FOCUS SYNCHRONIZATION: before you start explaining every new distinct paragraph, equation, worked-solution step, table, chart, or diagram, call focus_page_region for that exact item; wait for the tool result before speaking about it. When your explanation moves to a different item, move the rectangle first. Never keep the old rectangle displayed while explaining a new item, and never move it repeatedly without matching your spoken explanation. Use a tight box around the actual content; for selectable printed/handwritten text use the supplied PDF text-block geometry when matched. If you cannot identify a different target confidently, do not invent coordinates—say briefly that the visual target is uncertain and continue explaining with the best available reference. USER-DIRECTED REQUEST: if the learner asks for a specific item, question, solution, graph, diagram, equation, paragraph or named content, locate that exact item immediately even if it is above/behind the current item, call focus_page_region with user_requested_target=true, answer it, then resume the automatic lesson from the next uncovered item. Do not reject a user-directed jump as backwards or out of order. Do not use a large generic rectangle for a specific question; a multi-line solution may need a taller horizontal box, but no mostly blank/page-sized region. Do not use the overview montage for precise coordinates.\n\n"
+                "VISUAL FOCUS: The current full-page image may have a faint 10%-coordinate grid. Every box maps to the full current page, not the overview montage. If selectable text-block geometry is supplied, use the exact matching box for printed text/equations instead of guessing. First classify the semantic content: printed text and handwritten words/equations are text; a handwritten sketch, plotted chart, diagram, photo or real graphic is visual content. Visual graphics use a cyan rectangle, worked solutions use green, and all writing (including handwriting) uses amber. No laser dot or floating caption is shown. Do not draw arrows or any other page markup during the voice lesson; use only the focus rectangle. AUTOMATIC LESSON: plan in top-to-bottom reading order and cover all important items. MANDATORY FOCUS SYNCHRONIZATION: before you start explaining every new distinct paragraph, equation, worked-solution step, table, chart, or diagram, call focus_page_region for that exact item; wait for the tool result before speaking about it. When your explanation moves to a different item, move the rectangle first. Never keep the old rectangle displayed while explaining a new item, and never move it repeatedly without matching your spoken explanation. Use a box around the complete meaningful content, not a tiny token or a single handwritten glyph. For handwriting, include the full handwritten line, complete equation, or complete worked-solution step with modest margins; do not split one handwritten line into tiny boxes and do not guess based on a small ink fragment. A handwriting focus box must cover a readable phrase/line (normally at least about 15% of page width unless the actual item is visibly shorter) and must include ascenders, descenders, and punctuation. Before focusing a new item, verify it is a genuinely different target; after its explanation/audio finishes, release that rectangle before advancing unless the next target is already ready. Recheck the target against the page image and grid before every focus call. For selectable printed text use the supplied PDF text-block geometry when matched. If the handwriting is faint or ambiguous, use a broader box around the whole likely line/solution and say that the handwriting is unclear rather than focusing a small incorrect mark. If you cannot identify a different target confidently, do not invent coordinates—say briefly that the visual target is uncertain and continue explaining with the best available reference. USER-DIRECTED REQUEST: if the learner asks for a specific item, question, solution, graph, diagram, equation, paragraph or named content, locate that exact item immediately even if it is above/behind the current item, call focus_page_region with user_requested_target=true, answer it, then resume the automatic lesson from the next uncovered item. Do not reject a user-directed jump as backwards or out of order. Do not use a large generic rectangle for a specific question; a multi-line solution may need a taller horizontal box, but no mostly blank/page-sized region. Do not use the overview montage for precise coordinates.\n\n"
             "TEACHING BOARD: The board is a real editable Markdown workspace available to you as a tool, not merely an automatic transcript. At the beginning, call write_to_board with mode=append for a compact outline. After each 1-2 related focus targets, add a concise note/example/equation/table. Before appending, compare against the supplied current board and NEVER repeat the same definition, equation, example, heading or paragraph. If already present, add only genuinely new information; the app also rejects duplicates. Do not create near-identical paraphrases just to increase board updates. When the learner asks you to add an example, explain something ON the board, make a table, fix a mistake, simplify, reorganize, or rewrite the notes, call write_to_board with mode=append or mode=replace as appropriate. Use mode=replace to actually edit the existing board and refer to the current board text below; use mode=clear only if the learner explicitly asks to clear it. Do not claim you changed the board unless you call the tool. Use Markdown headings, **bold**, lists, Markdown tables and `inline code`; use readable equation notation such as F = ma, x², √x, or `a/b`, not raw LaTeX delimiters.\n\n"
             "DOCUMENT ROADMAP: Before this lesson, the application reviewed the first up to 10 pages below and may provide a contact sheet of those pages. Use these pages ONLY to understand the book's subject, definitions, notation and teaching sequence. Do not teach all those pages now. The only target for this lesson is the most recently provided full-size image of the currently displayed page.\n"
             + (f"\nLINKED SUPPLEMENTARY PDF: {Path(self.secondary_pdf_path).name}, page {self.secondary_page_index + 1} of {self.secondary_page_count}. This is a SECOND source shown beside the primary page. Use it to find the answer/solution when the primary page contains the question, compare related material, and explain cross-document links. The primary page remains the main lesson path; do not confuse page numbers between files.\nSUPPLEMENTARY PAGE TEXT:\n{self.secondary_page_text[:12000]}\n" if self.secondary_pdf_path else "")
@@ -1147,6 +1150,7 @@ class GeminiLiveTutorWorker(QThread):
                 wave_out_reset(handle)
             except Exception:
                 pass
+            self._speaker_playing_event.clear()
             for slot in slots:
                 if slot["prepared"]:
                     try:
@@ -1158,8 +1162,21 @@ class GeminiLiveTutorWorker(QThread):
                 slot["prepared"] = False
                 slot["pending"] = False
 
+        def refresh_speaker_state():
+            active = not self._speaker_queue.empty()
+            if not active:
+                for queued_slot in slots:
+                    if queued_slot["pending"] and not (int(queued_slot["header"].dwFlags) & 0x00000001):
+                        active = True
+                        break
+            if active:
+                self._speaker_playing_event.set()
+            else:
+                self._speaker_playing_event.clear()
+
         try:
             while not self._stop_event.is_set():
+                refresh_speaker_state()
                 if self._pause_event.is_set():
                     # Stop the currently queued WinMM buffers and wait without consuming
                     # further chunks. Resume is handled by a fresh model prompt.
@@ -1176,7 +1193,10 @@ class GeminiLiveTutorWorker(QThread):
                 try:
                     chunk = self._speaker_queue.get(timeout=0.04)
                 except queue.Empty:
+                    refresh_speaker_state()
                     continue
+                if chunk:
+                    self._speaker_playing_event.set()
                 if not chunk or self._stop_event.is_set():
                     continue
                 slot = slots[slot_index]
@@ -1214,9 +1234,11 @@ class GeminiLiveTutorWorker(QThread):
                 if code != 0:
                     raise RuntimeError(f"Windows waveOutWrite failed with multimedia error {code}.")
                 slot["pending"] = True
+                self._speaker_playing_event.set()
                 slot_index = (slot_index + 1) % len(slots)
         finally:
             reset_output()
+            self._speaker_playing_event.clear()
             wave_out_close(handle)
 
     def _speaker_loop(self):
@@ -1235,9 +1257,13 @@ class GeminiLiveTutorWorker(QThread):
                         try:
                             chunk = self._speaker_queue.get(timeout=0.12)
                         except queue.Empty:
+                            self._speaker_playing_event.clear()
                             continue
                         if chunk and not self._stop_event.is_set() and not self._ptt_event.is_set():
+                            self._speaker_playing_event.set()
                             output.write(chunk)
+                        if self._speaker_queue.empty():
+                            self._speaker_playing_event.clear()
         except Exception as exc:
             if not self._stop_event.is_set() and not self._output_error_reported:
                 self._output_error_reported = True
@@ -1764,8 +1790,13 @@ class GeminiLiveTutorWorker(QThread):
                                     # an automatic continuation prompt.
                                     self._understanding_state = "awaiting_confirmation"
                                     self._understanding_reply_active = False
+                                    self.focus_clear_requested.emit()
                                     self.status.emit("Waiting for your understanding confirmation · say yes to continue or no to clarify")
+                                elif self._page_lesson_completed:
+                                    self.focus_clear_requested.emit()
+                                    self.status.emit("Page lesson complete · waiting for your next question")
                                 else:
+                                    self.focus_clear_requested.emit()
                                     self.status.emit("Answer complete · the page was not marked complete")
 
                         tool_call = getattr(response, "tool_call", None)
@@ -1927,12 +1958,47 @@ class GeminiLiveTutorWorker(QThread):
                                         user_requested_target = True
                                     visual_target = kind in {"manual", "diagram", "chart", "photo", "image", "figure", "graph", "plot", "drawing", "table"}
                                     solution_target = kind in {"solution", "worked_solution", "handwriting"}
+                                    if not manual_locked and kind == "handwriting" and box:
+                                        # Handwritten characters are noisy and often have no
+                                        # selectable text geometry. Expand very tight model
+                                        # boxes to a readable line-sized focus target.
+                                        center_x = box[0] + box[2] / 2.0
+                                        center_y = box[1] + box[3] / 2.0
+                                        width = min(0.92, max(0.15, box[2]))
+                                        height = min(0.42, max(0.038, box[3]))
+                                        x = max(0.0, min(1.0 - width, center_x - width / 2.0))
+                                        y = max(0.0, min(1.0 - height, center_y - height / 2.0))
+                                        box = [x, y, width, height]
                                     # For selectable text, anchor estimated labels to PDF block geometry;
                                     # never run this override against a manual selection.
                                     excluded_boxes = [item.get("box") for item in self._focus_history[-16:]] if not user_requested_target else None
                                     matched_box = None if manual_locked else self._match_layout_box(label, kind, excluded_boxes=excluded_boxes, layout_items=focus_layout)
-                                    if not manual_locked and matched_box and (user_requested_target or kind in {"text", "equation", "problem", "solution", "worked_solution", "handwriting"}):
+                                    use_matched_box = bool(matched_box)
+                                    if use_matched_box and kind == "handwriting" and box:
+                                        # Never let fuzzy layout text matching jump to a different
+                                        # part of a handwriting-heavy page. The matched text block
+                                        # must lie mostly inside the model's visually selected area.
+                                        mx, my, mw, mh = [float(v) for v in matched_box]
+                                        bx, by, bw, bh = [float(v) for v in box]
+                                        ix1, iy1 = max(mx, bx), max(my, by)
+                                        ix2, iy2 = min(mx + mw, bx + bw), min(my + mh, by + bh)
+                                        intersection = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+                                        matched_area = max(1e-6, mw * mh)
+                                        use_matched_box = (intersection / matched_area) >= 0.70
+                                    if not manual_locked and use_matched_box and (user_requested_target or kind in {"text", "equation", "problem", "solution", "worked_solution", "handwriting"}):
                                         box = matched_box
+                                    # Re-apply the handwriting minimum AFTER text-block matching too.
+                                    # A fuzzy OCR/layout match can otherwise replace the broad model
+                                    # rectangle with a tiny word/glyph box, which is especially poor
+                                    # for cursive writing and multi-line worked solutions.
+                                    if not manual_locked and kind == "handwriting" and box:
+                                        center_x = box[0] + box[2] / 2.0
+                                        center_y = box[1] + box[3] / 2.0
+                                        width = min(0.92, max(0.15, box[2]))
+                                        height = min(0.42, max(0.038, box[3]))
+                                        x = max(0.0, min(1.0 - width, center_x - width / 2.0))
+                                        y = max(0.0, min(1.0 - height, center_y - height / 2.0))
+                                        box = [x, y, width, height]
                                     error_message = ""
                                     if page_idx != current_idx:
                                         error_message = f"Wrong page number. The visible target is page {current_idx + 1}; call focus_page_region for that page only."
@@ -2512,6 +2578,27 @@ class LiveTutorDialog(QDialog):
         self.set_page_navigation(1, 1)
         self._apply_window_theme(True)
 
+    def _set_start_button_caption(self, is_ar: bool | None = None):
+        """Keep the full-page lesson button caption localized in every state."""
+        if is_ar is None:
+            try:
+                settings = getattr(self.parent(), "settings", None)
+                language = str(settings.value("interface_language", "en", type=str) if settings is not None else "en")
+                is_ar = language.lower().startswith("ar")
+            except Exception:
+                is_ar = False
+
+        if self._session_active:
+            caption = "الشرح جارٍ" if is_ar else "Conversation active"
+            tooltip = "الحصة الصوتية نشطة حاليًا" if is_ar else "The live lesson is currently active"
+        else:
+            caption = "ابدأ شرح الصفحة بالكامل" if is_ar else "Start full-page lesson"
+            tooltip = "ابدأ حصة صوتية لشرح الصفحة الحالية بالكامل" if is_ar else "Start one live lesson for the current PDF page"
+
+        self.start_btn.setText(caption)
+        self.start_btn.setToolTip(tooltip)
+        self.start_btn.setAccessibleName(caption)
+
     def _apply_window_theme(self, enabled: bool = True):
         """Apply the exact application palette to the live lesson and its child editor."""
         parent = self.parent()
@@ -2541,6 +2628,7 @@ class LiveTutorDialog(QDialog):
         combo_chevron_asset = "combo_chevron_light.png" if theme_name == "light" else "combo_chevron_dark.png"
         combo_chevron_path = resource_path(combo_chevron_asset).replace("\\", "/")
         dialog_title = "حصة صوتية مع AI" if is_ar else "Audio lesson with AI"
+        self._set_start_button_caption(is_ar)
         self.setWindowTitle(dialog_title)
         self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
         self.teacher_preferences_dialog.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
@@ -3475,7 +3563,7 @@ class LiveTutorDialog(QDialog):
         self._session_active = bool(active)
         self._tutor_paused = bool(paused) if active else False
         self.start_btn.setEnabled(not active)
-        self.start_btn.setText("Conversation active" if active else "Start full-page lesson")
+        self._set_start_button_caption()
         self.stop_btn.setEnabled(active)
         self.refresh_btn.setEnabled(True)
         self.ptt_btn.setEnabled(bool(active and not self._tutor_paused))

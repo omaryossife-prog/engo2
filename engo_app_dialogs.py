@@ -24,6 +24,7 @@ from engo_base import (
     DEFAULT_BG,
     DEFAULT_INK,
     _engo_apply_dialog_consistency,
+    _engo_apply_windows_caption_theme,
     engo_ui_theme_tokens,
     is_supported_document,
     normalize_ui_theme,
@@ -97,12 +98,31 @@ class DocumentTabBar(QTabBar):
         self._drop_insert_index = None
         self.update()
 
+    def forget_tab(self, tab):
+        """Forget drag references before a tab is moved or permanently closed."""
+        if tab is None:
+            return
+        if self._pressed_tab is tab or self._link_target_tab is tab:
+            self._clear_press_state()
+            return
+        self._press_tab_rects.pop(tab, None)
+        self.update()
+
+    def _safe_tab_index(self, tab):
+        """Return a tab index without allowing deleted Qt wrappers to break paint."""
+        if tab is None:
+            return -1
+        try:
+            return self.owner.tabs.indexOf(tab)
+        except (RuntimeError, TypeError):
+            return -1
+
     def _insertion_target_for_position(self, pos):
         """Return the real tab-order insertion index and the visible green marker x."""
         visible = []
         order_without_source = [tab for tab in self.owner._tab_order if tab is not self._pressed_tab]
         for tab in order_without_source:
-            index = self.owner.tabs.indexOf(tab)
+            index = self._safe_tab_index(tab)
             if index < 0 or index >= self.count() or not self.isTabVisible(index):
                 continue
             rect = self.tabRect(index)
@@ -138,7 +158,7 @@ class DocumentTabBar(QTabBar):
 
     def _begin_tearoff(self, global_pos):
         tab = self._pressed_tab
-        if tab is None or self.owner.tabs.indexOf(tab) < 0:
+        if tab is None or self._safe_tab_index(tab) < 0:
             self._clear_press_state()
             return
         self._clear_press_state()
@@ -165,10 +185,13 @@ class DocumentTabBar(QTabBar):
     def _find_link_target(self, pos):
         """Only the central 60% of another visible tab is a link drop zone."""
         source_tab = self._pressed_tab
-        if source_tab is None or not self.rect().contains(pos):
+        if source_tab is None or self._safe_tab_index(source_tab) < 0 or not self.rect().contains(pos):
             return None
-        for index, candidate in enumerate(self.owner._tab_order):
-            if candidate is source_tab or index >= self.count() or not self.isTabVisible(index):
+        for candidate in self.owner._tab_order:
+            if candidate is source_tab:
+                continue
+            index = self._safe_tab_index(candidate)
+            if index < 0 or index >= self.count() or not self.isTabVisible(index):
                 continue
             rect = self.tabRect(index)
             if rect.isNull() or not rect.contains(pos):
@@ -182,41 +205,55 @@ class DocumentTabBar(QTabBar):
         super().paintEvent(event)
         if not self._drag_active and self._external_link_target_index < 0 and self._drop_indicator_x is None:
             return
+
+        # A QTabBar may receive a queued repaint after a document has been
+        # closed or moved to another window.  Never let an invalid PyQt wrapper
+        # escape from paintEvent; that would also skip QPainter.end().
+        source_index = self._safe_tab_index(self._pressed_tab)
+        target_index = self._safe_tab_index(self._link_target_tab)
+        if self._pressed_tab is not None and source_index < 0:
+            self._clear_press_state()
+            source_index = -1
+            target_index = -1
+        elif self._link_target_tab is not None and target_index < 0:
+            self._link_target_tab = None
+
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        green = QColor(39, 190, 112)
-        source_index = self.owner.tabs.indexOf(self._pressed_tab) if self._pressed_tab is not None else -1
-        target_indices = set()
-        if self._link_target_tab is not None:
-            idx = self.owner.tabs.indexOf(self._link_target_tab)
-            if idx >= 0:
-                target_indices.add(idx)
-        if self._external_link_target_index >= 0:
-            target_indices.add(self._external_link_target_index)
-        if source_index >= 0:
-            source_rect = self.tabRect(source_index).adjusted(2, 2, -2, -2)
-            painter.setPen(QPen(QColor(39, 190, 112, 190), 2))
-            painter.setBrush(QColor(39, 190, 112, 32))
-            painter.drawRoundedRect(source_rect, 7, 7)
-        for idx in target_indices:
-            if not (0 <= idx < self.count()):
-                continue
-            target_rect = self.tabRect(idx).adjusted(2, 2, -2, -2)
-            painter.setPen(QPen(green, 2))
-            painter.setBrush(QColor(39, 190, 112, 82))
-            painter.drawRoundedRect(target_rect, 7, 7)
-            painter.setPen(QColor(205, 255, 224))
-            painter.drawText(target_rect.adjusted(4, 0, -7, 0),
-                             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                             "🔗")
-        if self._drop_indicator_x is not None and self._link_target_tab is None:
-            x = int(self._drop_indicator_x)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(39, 190, 112, 65))
-            painter.drawRoundedRect(QRectF(x - 5, 3, 10, max(8, self.height() - 6)), 5, 5)
-            painter.setBrush(QColor(72, 235, 145))
-            painter.drawRoundedRect(QRectF(x - 2, 2, 4, max(10, self.height() - 4)), 2, 2)
-        painter.end()
+        if not painter.isActive():
+            return
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            green = QColor(39, 190, 112)
+            target_indices = set()
+            if target_index >= 0:
+                target_indices.add(target_index)
+            if self._external_link_target_index >= 0:
+                target_indices.add(self._external_link_target_index)
+            if source_index >= 0:
+                source_rect = self.tabRect(source_index).adjusted(2, 2, -2, -2)
+                painter.setPen(QPen(QColor(39, 190, 112, 190), 2))
+                painter.setBrush(QColor(39, 190, 112, 32))
+                painter.drawRoundedRect(source_rect, 7, 7)
+            for idx in target_indices:
+                if not (0 <= idx < self.count()):
+                    continue
+                target_rect = self.tabRect(idx).adjusted(2, 2, -2, -2)
+                painter.setPen(QPen(green, 2))
+                painter.setBrush(QColor(39, 190, 112, 82))
+                painter.drawRoundedRect(target_rect, 7, 7)
+                painter.setPen(QColor(205, 255, 224))
+                painter.drawText(target_rect.adjusted(4, 0, -7, 0),
+                                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                                 "🔗")
+            if self._drop_indicator_x is not None and self._link_target_tab is None:
+                x = int(self._drop_indicator_x)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(39, 190, 112, 65))
+                painter.drawRoundedRect(QRectF(x - 5, 3, 10, max(8, self.height() - 6)), 5, 5)
+                painter.setBrush(QColor(72, 235, 145))
+                painter.drawRoundedRect(QRectF(x - 2, 2, 4, max(10, self.height() - 4)), 2, 2)
+        finally:
+            painter.end()
 
     def mouseMoveEvent(self, event):
         if self._pressed_tab is not None and (event.buttons() & Qt.MouseButton.LeftButton):
@@ -266,8 +303,8 @@ class DocumentTabBar(QTabBar):
             self._clear_press_state()
             return
 
-        source_index = self.owner.tabs.indexOf(source_tab) if source_tab is not None else -1
-        target_index = self.owner.tabs.indexOf(target_tab) if target_tab is not None else -1
+        source_index = self._safe_tab_index(source_tab)
+        target_index = self._safe_tab_index(target_tab)
         if source_index >= 0 and target_index >= 0 and source_index != target_index:
             self._clear_press_state()
             self.owner._link_tabs_in_window(source_index, target_index)
@@ -458,6 +495,9 @@ class FirstRunSetupDialog(QDialog):
         super().__init__(parent)
         self.selected_language = None
         self.selected_theme = None
+        self._preview_theme = "dark"
+        self._theme_transition_animation = None
+        self.setProperty("engoOwnThemePreview", True)
         self.setObjectName("firstRunSetupDialog")
         self.setWindowTitle("Welcome to Engo · First-time setup")
         self.setModal(True)
@@ -480,9 +520,9 @@ class FirstRunSetupDialog(QDialog):
         mark.setFixedSize(48, 48)
         copy = QVBoxLayout()
         copy.setSpacing(2)
-        title = QLabel("Welcome to Engo · مرحبًا بك في Engo")
+        title = QLabel("Welcome to (Engo) مرحبًا بك في ")
         title.setObjectName("firstRunTitle")
-        subtitle = QLabel("Let's set up your study space in two quick steps.")
+        subtitle = QLabel("Let's set up your study space in two quick steps")
         subtitle.setObjectName("firstRunSubtitle")
         copy.addWidget(title)
         copy.addWidget(subtitle)
@@ -494,10 +534,14 @@ class FirstRunSetupDialog(QDialog):
         self.step_label.setObjectName("firstRunStep")
         root.addWidget(self.step_label)
         self.stack = QStackedWidget(self)
+        self.stack.setObjectName("firstRunStack")
         root.addWidget(self.stack, 1)
 
         # Step one: language selection.
         language_page = QWidget()
+        language_page.setObjectName("firstRunLanguagePage")
+        language_page.setAutoFillBackground(True)
+        self.language_page = language_page
         language_layout = QVBoxLayout(language_page)
         language_layout.setContentsMargins(4, 4, 4, 4)
         language_layout.setSpacing(12)
@@ -512,15 +556,15 @@ class FirstRunSetupDialog(QDialog):
         self.language_group = QButtonGroup(self)
         self.language_group.setExclusive(True)
         self.language_cards = {}
-        for code, label, sublabel in (
-            ("en", "English", "English interface"),
-            ("ar", "العربية", "واجهة عربية"),
+        for code, label in (
+            ("en", "English interface"),
+            ("ar", "واجهة بالعربية"),
         ):
             card = QToolButton(language_page)
             card.setObjectName("firstRunLanguageCard")
             card.setCheckable(True)
             card.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-            card.setText(label + "\n" + sublabel)
+            card.setText(label)
             card.setFixedSize(240, 124)
             card.setCursor(Qt.CursorShape.PointingHandCursor)
             card.clicked.connect(lambda _checked=False, value=code: self._choose_language(value))
@@ -533,6 +577,9 @@ class FirstRunSetupDialog(QDialog):
 
         # Step two: visual theme selection.
         theme_page = QWidget()
+        theme_page.setObjectName("firstRunThemePage")
+        theme_page.setAutoFillBackground(True)
+        self.theme_page = theme_page
         theme_layout = QVBoxLayout(theme_page)
         theme_layout.setContentsMargins(4, 4, 4, 4)
         theme_layout.setSpacing(11)
@@ -543,6 +590,9 @@ class FirstRunSetupDialog(QDialog):
         theme_layout.addWidget(self.theme_heading)
         theme_layout.addWidget(self.theme_caption)
         theme_cards_widget = QWidget(theme_page)
+        theme_cards_widget.setObjectName("firstRunThemeCards")
+        theme_cards_widget.setAutoFillBackground(True)
+        self.theme_cards_widget = theme_cards_widget
         theme_cards = QGridLayout(theme_cards_widget)
         theme_cards.setContentsMargins(0, 0, 0, 0)
         theme_cards.setHorizontalSpacing(8)
@@ -581,7 +631,7 @@ class FirstRunSetupDialog(QDialog):
         footer.addWidget(self.next_button)
         root.addLayout(footer)
         self._apply_wizard_language("en")
-        self._apply_wizard_style()
+        self._apply_wizard_style(self._preview_theme)
 
     def _choose_language(self, code):
         self.selected_language = code
@@ -590,20 +640,52 @@ class FirstRunSetupDialog(QDialog):
         self.next_button.setEnabled(True)
 
     def _choose_theme(self, theme):
-        self.selected_theme = theme
+        self.selected_theme = normalize_ui_theme(theme)
         for key, card in self.theme_cards.items():
-            card.setChecked(key == theme)
+            card.setChecked(key == self.selected_theme)
         self.next_button.setEnabled(True)
+        self._animate_theme_preview(self.selected_theme)
+
+    def _animate_theme_preview(self, theme):
+        """Quickly fade the wizard while applying the chosen live theme preview."""
+        theme = normalize_ui_theme(theme)
+        old_animation = self._theme_transition_animation
+        if old_animation is not None:
+            try:
+                old_animation.stop()
+            except RuntimeError:
+                pass
+        fade_out = QPropertyAnimation(self, b"windowOpacity", self)
+        fade_out.setDuration(75)
+        fade_out.setEasingCurve(QEasingCurve.Type.OutCubic)
+        fade_out.setStartValue(float(self.windowOpacity()))
+        fade_out.setEndValue(0.76)
+        self._theme_transition_animation = fade_out
+
+        def apply_and_fade_back():
+            self._apply_wizard_style(theme)
+            fade_in = QPropertyAnimation(self, b"windowOpacity", self)
+            fade_in.setDuration(115)
+            fade_in.setEasingCurve(QEasingCurve.Type.OutCubic)
+            fade_in.setStartValue(float(self.windowOpacity()))
+            fade_in.setEndValue(1.0)
+            self._theme_transition_animation = fade_in
+            fade_in.finished.connect(lambda: setattr(self, "_theme_transition_animation", None))
+            fade_in.start()
+
+        fade_out.finished.connect(apply_and_fade_back)
+        fade_out.start()
 
     def _apply_wizard_language(self, language):
         is_ar = language == "ar"
         self.step_label.setText("الخطوة ١ من ٢ · اللغة" if is_ar else "STEP 1 OF 2  ·  LANGUAGE")
         self.language_heading.setText("اختر لغة واجهة Engo" if is_ar else "Choose your interface language")
         self.language_caption.setText("يمكنك تغيير اللغة لاحقًا من الإعدادات." if is_ar else "You can change this later in Settings.")
-        self.language_cards["en"].setText("English\nواجهة إنجليزية" if is_ar else "English\nEnglish interface")
-        self.language_cards["ar"].setText("العربية\nواجهة عربية" if is_ar else "العربية\nArabic interface")
-        self.language_cards["en"].setLayoutDirection(Qt.LayoutDirection.RightToLeft if is_ar else Qt.LayoutDirection.LeftToRight)
-        self.language_cards["ar"].setLayoutDirection(Qt.LayoutDirection.RightToLeft if is_ar else Qt.LayoutDirection.LeftToRight)
+        # Keep each language card in its own language, without duplicate headings.
+        self.language_cards["en"].setText("English interface")
+        self.language_cards["ar"].setText("واجهة بالعربية")
+        self.language_cards["en"].setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        self.language_cards["ar"].setLayoutDirection(Qt.LayoutDirection.RightToLeft)
 
     def _go_to_theme(self):
         if not self.selected_language:
@@ -654,28 +736,83 @@ class FirstRunSetupDialog(QDialog):
     def closeEvent(self, event):
         event.ignore()
 
-    def _apply_wizard_style(self):
-        self.setStyleSheet("""
-            QDialog#firstRunSetupDialog { background:#eef2f7; color:#25364d; }
-            QFrame#firstRunHero { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #ffffff,stop:1 #e5edf8); border:1px solid #cbd6e5; border-left:4px solid #3269d8; border-radius:14px; }
-            QLabel#firstRunMark { background:#3269d8; color:white; border-radius:12px; font-size:22pt; font-weight:850; }
-            QLabel#firstRunTitle { color:#20334f; font-size:15pt; font-weight:850; }
-            QLabel#firstRunSubtitle { color:#63748d; font-size:9pt; }
-            QLabel#firstRunStep { color:#3269d8; font-size:8pt; font-weight:850; letter-spacing:1px; padding:2px 4px; }
-            QLabel#firstRunPageTitle { color:#22344d; font-size:15pt; font-weight:800; }
-            QLabel#firstRunPageCaption { color:#687990; font-size:9pt; }
-            QToolButton#firstRunLanguageCard { background:#ffffff; color:#263b59; border:1px solid #cbd6e5; border-radius:12px; font-size:14pt; font-weight:800; padding:16px; }
-            QToolButton#firstRunLanguageCard:hover { background:#f2f6fc; border-color:#91acd2; }
-            QToolButton#firstRunLanguageCard:checked { background:#e8f0ff; color:#1d4f9c; border:2px solid #3269d8; }
-            QToolButton#themePreviewCard { background:#ffffff; color:#26364d; border:1px solid #cbd6e5; border-radius:10px; padding:7px; font-size:9pt; font-weight:800; }
-            QToolButton#themePreviewCard:hover { background:#f2f6fc; border-color:#91acd2; }
-            QToolButton#themePreviewCard:checked { background:#e8f0ff; color:#1d4f9c; border:2px solid #3269d8; }
-            QPushButton#firstRunPrimary { background:#3269d8; color:#ffffff; border:1px solid #2459c2; border-radius:8px; padding:9px 18px; min-width:150px; min-height:34px; font-weight:800; }
-            QPushButton#firstRunPrimary:hover:enabled { background:#245bc7; }
-            QPushButton#firstRunPrimary:disabled { background:#d7dfeb; color:#8b98aa; border-color:#d0d8e3; }
-            QPushButton#firstRunSecondary { background:#ffffff; color:#34445b; border:1px solid #c6d0de; border-radius:8px; padding:8px 15px; min-height:34px; font-weight:700; }
-            QPushButton#firstRunSecondary:hover { background:#e8eef7; }
+    def _apply_wizard_style(self, theme=None):
+        """Apply one complete, high-contrast palette to every first-run surface."""
+        theme = normalize_ui_theme(theme or self._preview_theme)
+        self._preview_theme = theme
+        c = engo_ui_theme_tokens(theme)
+        # Accent hues differ in brightness across palettes. Use the higher-contrast
+        # foreground for primary actions instead of forcing white on pale accents.
+        accent_text = "#ffffff" if theme == "light" else "#17202b"
+
+        palette = QPalette(self.palette())
+        palette_roles = {
+            QPalette.ColorRole.Window: c["window"],
+            QPalette.ColorRole.WindowText: c["text"],
+            QPalette.ColorRole.Base: c["input"],
+            QPalette.ColorRole.AlternateBase: c["panel"],
+            QPalette.ColorRole.Text: c["text"],
+            QPalette.ColorRole.Button: c["raised"],
+            QPalette.ColorRole.ButtonText: c["text"],
+            QPalette.ColorRole.Highlight: c["selection"],
+            QPalette.ColorRole.HighlightedText: c["selection_text"],
+            QPalette.ColorRole.ToolTipBase: c["panel"],
+            QPalette.ColorRole.ToolTipText: c["text"],
+            QPalette.ColorRole.PlaceholderText: c["muted"],
+        }
+        for role, color in palette_roles.items():
+            palette.setColor(role, QColor(color))
+        self.setPalette(palette)
+        self.setAutoFillBackground(True)
+        for widget in (self.stack, self.language_page, self.theme_page, self.theme_cards_widget):
+            widget.setPalette(palette)
+            widget.setAutoFillBackground(True)
+
+        self.setStyleSheet(f"""
+            QDialog#firstRunSetupDialog {{ background:{c['window']}; color:{c['text']}; }}
+            QDialog#firstRunSetupDialog QWidget {{ color:{c['text']}; }}
+            QStackedWidget#firstRunStack {{ background:{c['panel']}; border:1px solid {c['border']}; border-radius:12px; }}
+            QWidget#firstRunLanguagePage, QWidget#firstRunThemePage, QWidget#firstRunThemeCards {{
+                background:{c['panel']}; color:{c['text']};
+            }}
+            QFrame#firstRunHero {{ background:{c['panel_alt']}; border:1px solid {c['border']};
+                border-left:4px solid {c['accent']}; border-radius:14px; }}
+            QLabel#firstRunMark {{ background:{c['accent']}; color:#ffffff; border-radius:12px;
+                font-size:22pt; font-weight:850; }}
+            QLabel#firstRunTitle {{ color:{c['text']}; font-size:15pt; font-weight:850; }}
+            QLabel#firstRunSubtitle {{ color:{c['muted']}; font-size:9pt; }}
+            QLabel#firstRunStep {{ color:{c['accent']}; font-size:8pt; font-weight:850;
+                letter-spacing:1px; padding:2px 4px; }}
+            QLabel#firstRunPageTitle {{ color:{c['text']}; font-size:15pt; font-weight:800; }}
+            QLabel#firstRunPageCaption {{ color:{c['muted']}; font-size:9pt; }}
+            QToolButton#firstRunLanguageCard {{ background:{c['card']}; color:{c['text']};
+                border:1px solid {c['border']}; border-radius:12px; font-size:14pt;
+                font-weight:800; padding:16px; }}
+            QToolButton#firstRunLanguageCard:hover {{ background:{c['hover']}; border-color:{c['accent']}; }}
+            QToolButton#firstRunLanguageCard:checked {{ background:{c['selection']};
+                color:{c['selection_text']}; border:2px solid {c['accent']}; }}
+            QToolButton#themePreviewCard {{ background:{c['card']}; color:{c['text']};
+                border:1px solid {c['border']}; border-radius:10px; padding:7px;
+                font-size:9pt; font-weight:800; }}
+            QToolButton#themePreviewCard:hover {{ background:{c['hover']}; border-color:{c['accent']}; }}
+            QToolButton#themePreviewCard:checked {{ background:{c['selection']};
+                color:{c['selection_text']}; border:2px solid {c['accent']}; }}
+            QPushButton#firstRunPrimary {{ background:{c['accent']}; color:{accent_text};
+                border:1px solid {c['accent']}; border-radius:8px; padding:9px 18px;
+                min-width:150px; min-height:34px; font-weight:800; }}
+            QPushButton#firstRunPrimary:hover:enabled {{ background:{c['accent_hover']}; color:{accent_text}; }}
+            QPushButton#firstRunPrimary:disabled {{ background:{c['raised']}; color:{c['muted']};
+                border-color:{c['border']}; }}
+            QPushButton#firstRunSecondary {{ background:{c['raised']}; color:{c['text']};
+                border:1px solid {c['border']}; border-radius:8px; padding:8px 15px;
+                min-height:34px; font-weight:700; }}
+            QPushButton#firstRunSecondary:hover {{ background:{c['hover']}; border-color:{c['accent']}; }}
         """)
+        # Keep the real Windows caption and native window controls in sync with
+        # the same live preview palette (Qt stylesheets cannot paint the caption).
+        _engo_apply_windows_caption_theme(self, theme)
+        QTimer.singleShot(80, lambda obj=self, current=theme:
+                          _engo_apply_windows_caption_theme(obj, current))
 
 
 class _SettingsNoWheelSlider(QSlider):
@@ -710,6 +847,7 @@ class AppSettingsDialog(QDialog):
     def __init__(self, settings: QSettings, parent=None, language="en"):
         super().__init__(parent)
         self.settings = settings
+        self.reset_requested = False
         self.language = "ar" if str(language).lower() == "ar" else "en"
         self.setObjectName("appSettingsDialog")
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft if self.language == "ar" else Qt.LayoutDirection.LeftToRight)
@@ -1071,6 +1209,14 @@ class AppSettingsDialog(QDialog):
             return action_button
 
         maintenance_action(
+            "إعدادات الذكاء الاصطناعي" if is_ar else "AI settings",
+            "إدارة مزوّدي الذكاء الاصطناعي ومفاتيح API والنماذج وإعدادات الصوت والترجمة." if is_ar
+            else "Manage AI providers, API keys, model IDs, voice and translation preferences.",
+            "Ai فتح اعدادات" if is_ar else "Open AI settings",
+            "settingsMaintenanceButton", self._open_ai_settings_action
+        )
+
+        maintenance_action(
             "مسح الكاش" if is_ar else "Clear cache",
             "يحذف صور المعاينة والملفات المؤقتة وبيانات النماذج المخزّنة فقط. لا يحذف المحادثات أو ملفاتك." if is_ar
             else "Removes cached previews, temporary files and cached model lists only. Your chats and documents stay untouched.",
@@ -1158,15 +1304,26 @@ class AppSettingsDialog(QDialog):
         scroll.viewport().setAutoFillBackground(True)
         content.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         content.setAutoFillBackground(True)
-        self.setStyleSheet(self._build_theme_stylesheet(c))
+        self.setStyleSheet(self._build_theme_stylesheet(c, self.language))
         # Re-apply the shared native palette after the local stylesheet is ready.
         _engo_apply_dialog_consistency(self, active_theme, is_ar)
         self._active_theme = active_theme
         self._base_theme_stylesheet = self.styleSheet()
         self._base_theme_colors = dict(colors)
 
+    def _open_ai_settings_action(self):
+        main_window = self.parent()
+        opener = getattr(main_window, "open_ai_provider_settings", None)
+        if callable(opener):
+            opener(self)
+
     @staticmethod
-    def _build_theme_stylesheet(c):
+    def _build_theme_stylesheet(c, language="en"):
+        # In English, the accent fill grows from the physical left toward the
+        # handle (LTR). Keep the existing Arabic fill direction unchanged.
+        is_english = str(language).strip().lower() != "ar"
+        slider_sub_page = c["accent"] if is_english else c["border"]
+        slider_add_page = c["border"] if is_english else c["accent"]
         return f"""
             QDialog#appSettingsDialog {{ background: {c['bg']}; color: {c['text']}; }}
             QDialog#appSettingsDialog QLabel {{ background: transparent; color: {c['text']}; }}
@@ -1186,8 +1343,8 @@ class AppSettingsDialog(QDialog):
             QComboBox#settingsCombo:focus {{ border:1px solid {c['accent']}; }}
             QSlider#settingsSlider {{ background:transparent; min-height:28px; }}
             QSlider#settingsSlider::groove:horizontal {{ height:5px; background:{c['border']}; border:0; border-radius:2px; }}
-            QSlider#settingsSlider::sub-page:horizontal {{ background:{c['border']}; border-radius:2px; }}
-            QSlider#settingsSlider::add-page:horizontal {{ background:{c['accent']}; border-radius:2px; }}
+            QSlider#settingsSlider::sub-page:horizontal {{ background:{slider_sub_page}; border-radius:2px; }}
+            QSlider#settingsSlider::add-page:horizontal {{ background:{slider_add_page}; border-radius:2px; }}
             QSlider#settingsSlider::handle:horizontal {{ background:{c['accent']}; border:2px solid {c['bg']}; width:15px; height:15px; margin:-6px 0; border-radius:8px; }}
             QSlider#settingsSlider::handle:horizontal:hover {{ background:{c['accent_hover']}; }}
             QSlider#settingsSlider::tick-mark {{ background:{c['muted']}; width:2px; height:5px; }}
@@ -1256,7 +1413,7 @@ class AppSettingsDialog(QDialog):
         """Restyle this already-open settings window from the shared theme tokens."""
         theme = normalize_ui_theme(theme or self.settings.value("ui_theme", "dark", type=str))
         colors = self._theme_style_colors(theme)
-        self.setStyleSheet(self._build_theme_stylesheet(colors))
+        self.setStyleSheet(self._build_theme_stylesheet(colors, self.language))
         _engo_apply_dialog_consistency(self, theme, self.language == "ar")
         self._active_theme = theme
 
@@ -1506,16 +1663,19 @@ class AppSettingsDialog(QDialog):
         return removed, failed
 
     def _reset_program_action(self):
+        """Request a full reset, then let MainWindow close and relaunch cleanly."""
         is_ar = self.language == "ar"
         title = "إعادة ضبط Engo" if is_ar else "Reset Engo"
         message = (
-            "سيتم إرجاع إعدادات الواجهة واللغة والخطوط وأشرطة الأدوات إلى الوضع الافتراضي، ومسح قائمة الملفات الأخيرة وبيانات الجلسة المحفوظة، وحذف مفاتيح API المحفوظة (ستحتاج لإدخالها مرة أخرى).\n\n"
-            "ستظل كل المحادثات وصور مرفقاتها ولوحات الشرح وملفات PDF وتعليقاتها محفوظة.\n\n"
-            "هل تريد إعادة الضبط؟"
+            "سيتم إغلاق Engo وإعادة تشغيله من البداية، وستظهر شاشات الترحيب لاختيار اللغة والثيم كأنك تستخدم البرنامج لأول مرة.\n\n"
+            "سيتم مسح إعدادات البرنامج والملفات الأخيرة والجلسة المحفوظة ومفاتيح API.\n\n"
+            "ستظل ملفات PDF وتعليقاتها والمحادثات ومرفقاتها ولوحات الشرح محفوظة ولن يتم حذفها.\n\n"
+            "هل تريد المتابعة؟"
             if is_ar else
-            "This restores the interface, language, typography and toolbar preferences to defaults, clears recent-file/session settings, and removes saved API keys (you will need to enter them again).\n\n"
-            "All conversations and their attachments, lesson boards, PDFs and PDF annotations will be preserved.\n\n"
-            "Reset Engo now?"
+            "Engo will close and restart from the beginning. The welcome setup will appear so you can choose the interface language and theme as if you were using the app for the first time.\n\n"
+            "Application preferences, recent-file history, the saved session and API keys will be cleared.\n\n"
+            "Your PDFs and annotations, conversations and attachments, and lesson boards will be preserved.\n\n"
+            "Continue with Reset Engo?"
         )
         answer = QMessageBox.question(
             self, title, message,
@@ -1525,82 +1685,10 @@ class AppSettingsDialog(QDialog):
         if answer != QMessageBox.StandardButton.Yes:
             return
 
-        removed_keys, failed_keys = self._delete_provider_credentials()
-        try:
-            self.settings.clear()
-            self.settings.sync()
-        except Exception as exc:
-            QMessageBox.warning(self, title, f"Could not reset local settings: {exc}")
-            return
-
-        main_window = self.parent()
-        # Clear disposable caches as part of a full reset. The chat and lesson-board
-        # databases live outside the selected cache folders and are intentionally kept.
-        cache_stats = self._perform_cache_cleanup(main_window)
-
-        # Keep the running window consistent with the new default state until it closes.
-        if main_window is not None:
-            try:
-                main_window.dark_mode = False
-                main_window.smart_page_theme = False
-                main_window.bg_color = DEFAULT_BG
-                main_window.ink_color = DEFAULT_INK
-                main_window.custom_page_themes = {}
-                main_window.annotation_colors = dict(DEFAULT_ANNOTATION_COLORS)
-                main_window._toolbar_pinned = True
-                main_window._fullscreen_toolbar_pinned = True
-                main_window._toolbar_manually_hidden = False
-                if hasattr(main_window, "topbar"):
-                    main_window.topbar.setMaximumHeight(16777215)
-                    main_window.topbar.show()
-                if hasattr(main_window, "_sync_toolbar_pin_button"):
-                    main_window._sync_toolbar_pin_button()
-                for tab in main_window.findChildren(DocumentTab):
-                    try:
-                        tab.set_theme(False, DEFAULT_BG, DEFAULT_INK, False)
-                        tab.annotation_colors = dict(DEFAULT_ANNOTATION_COLORS)
-                    except Exception:
-                        pass
-                if hasattr(main_window, "_refresh_files_home"):
-                    main_window._refresh_files_home()
-                panel = getattr(main_window, "ai_panel", None)
-                if panel is not None:
-                    default_provider_index = panel.provider_combo.findData("deepseek")
-                    if default_provider_index >= 0:
-                        panel.provider_combo.setCurrentIndex(default_provider_index)
-                    panel._provider_changed(panel.provider_combo.currentIndex())
-            except Exception:
-                pass
-
-        defaults = {
-            self.scale_combo: "1.00",
-            self.theme_combo: "dark",
-            self.language_combo: "en",
-            self.chat_font_combo: "13",
-            self.typing_font_combo: "12",
-            self.translation_font_combo: "13",
-        }
-        for combo, value in defaults.items():
-            index = combo.findData(value)
-            if index >= 0:
-                combo.setCurrentIndex(index)
-
-        notes = []
-        if failed_keys:
-            names = ", ".join(AI_PROVIDER_LABELS.get(item, item) for item in failed_keys)
-            notes.append((f"تعذر التأكد من حذف مفاتيح: {names}." if is_ar else
-                          f"Could not verify removal of keys for: {names}."))
-        if cache_stats.get("errors"):
-            notes.append((f"تعذر حذف {cache_stats['errors']} ملف كاش." if is_ar else
-                          f"Could not remove {cache_stats['errors']} cache item(s)."))
-        completion = (
-            "تمت إعادة ضبط إعدادات Engo. المحادثات ولوحات الشرح وملفات PDF ما زالت محفوظة. ستحتاج إلى إدخال مفاتيح API مرة أخرى."
-            if is_ar else
-            "Engo settings have been reset. Conversations, lesson boards and PDFs are still saved. Re-enter your API keys to use AI providers."
-        )
-        if notes:
-            completion += "\n\n" + "\n".join(notes)
-        QMessageBox.information(self, title, completion)
+        # Do not mutate settings here. The owning MainWindow must first close all
+        # windows cleanly (including any save/stop-task prompts), then clear QSettings
+        # and relaunch so startup detects an empty profile and opens FirstRunSetupDialog.
+        self.reset_requested = True
         self.accept()
 
     def values(self):

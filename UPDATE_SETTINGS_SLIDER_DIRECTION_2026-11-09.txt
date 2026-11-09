@@ -1,0 +1,8 @@
+Settings slider accent direction — 2026-11-09
+
+Changed only the settings sliders used for interface scale and text sizes:
+- English interface: accent-colored progress is on the physical left side of the handle and grows left-to-right.
+- Arabic interface: keeps the previous accent-colored side unchanged.
+
+The same language-aware stylesheet is applied both when the settings dialog opens and when its theme is refreshed.
+No saved settings, slider ranges, values, or document data were changed.

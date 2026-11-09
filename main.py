@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 import pymupdf as fitz  # use the maintained import name; keep fitz alias for existing calls
 from PIL import Image, ImageOps, ImageChops, ImageFilter
-from PyQt6.QtCore import QObject, Qt, QSize, QSizeF, QRect, QRectF, QPoint, QPointF, QEvent, QTimer, QPropertyAnimation, QParallelAnimationGroup, QVariantAnimation, QEasingCurve, QSettings, QUrl, QThread, QRunnable, QThreadPool, QMarginsF, QStandardPaths, QDir, pyqtSignal, QBuffer, QByteArray, QIODevice, QMimeData, QSignalBlocker
+from PyQt6.QtCore import QObject, Qt, QSize, QSizeF, QRect, QRectF, QPoint, QPointF, QEvent, QTimer, QPropertyAnimation, QParallelAnimationGroup, QVariantAnimation, QEasingCurve, QSettings, QUrl, QThread, QRunnable, QThreadPool, QMarginsF, QStandardPaths, QDir, pyqtSignal, QBuffer, QByteArray, QIODevice, QMimeData, QSignalBlocker, QProcess
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtGui import QColor, QPalette, QImage, QPixmap, QIcon, QFileSystemModel, QPainter, QPen, QBrush, QKeySequence, QShortcut, QAction, QCursor, QPolygonF, QPainterPath, QPainterPathStroker, QDesktopServices, QPdfWriter, QPageSize, QTextDocument, QTextCursor, QFont, QDrag, QContextMenuEvent, QMouseEvent
 from PyQt6.QtWidgets import (
@@ -40,6 +40,7 @@ from engo_ai_chat import (
     AIChatPanel,
 )
 from engo_ai_core import (
+    AISettingsDialog,
     AIRequestWorker,
     AI_DEFAULT_MODELS,
     AI_PROVIDER_LABELS,
@@ -1399,7 +1400,11 @@ class MainWindow(QMainWindow):
             self.settings, self,
             language=str(self.settings.value("interface_language", "en", type=str) or "en"),
         )
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        result = dialog.exec()
+        if getattr(dialog, "reset_requested", False):
+            self._begin_reset_and_restart(dialog)
+            return
+        if result == QDialog.DialogCode.Accepted:
             for key, value in dialog.values().items():
                 self.settings.setValue(key, value)
             self.settings.sync()
@@ -1412,6 +1417,148 @@ class MainWindow(QMainWindow):
                 self._apply_user_interface_preferences()
             self._apply_interface_language()
             self.show_status("Application settings updated")
+
+    def open_ai_provider_settings(self, parent_dialog=None):
+        """Open provider/model credentials from the central application settings."""
+        try:
+            self.settings.sync()
+        except Exception:
+            pass
+        dialog_parent = parent_dialog if isinstance(parent_dialog, QWidget) else self
+        dlg = AISettingsDialog(self.settings, dialog_parent)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            panel = getattr(self, "ai_panel", None)
+            if panel is not None:
+                try:
+                    panel._provider_changed(panel.provider_combo.currentIndex())
+                except (RuntimeError, AttributeError):
+                    pass
+            is_ar = str(self.settings.value("interface_language", "en", type=str) or "en").lower().startswith("ar")
+            self.show_status("تم حفظ إعدادات مزوّدي الذكاء الاصطناعي" if is_ar else "AI provider settings saved")
+
+    def close_ai_panel(self):
+        """Close the chat panel, leaving full-screen chat first when necessary."""
+        if self._chat_focus_mode:
+            self.toggle_chat_focus_mode(False)
+            QTimer.singleShot(760, lambda: self._animate_ai_panel(False) if self.ai_panel.isVisible() else None)
+        else:
+            self._animate_ai_panel(False)
+
+    def _begin_reset_and_restart(self, reset_dialog):
+        """Close every Engo window, clear the profile, and relaunch into first-run setup."""
+        app = QApplication.instance()
+        if app is None:
+            return
+
+        # Prevent Qt from quitting between closing the last window and completing
+        # the reset/relaunch workflow. Close the settings-owning window first so
+        # any unsaved-document prompt can cancel before other windows are touched.
+        app.setQuitOnLastWindowClosed(False)
+        windows = [w for w in list(MainWindow._open_windows)
+                   if not getattr(w, "_closing_complete", False)]
+        ordered = ([self] if self in windows else []) + [w for w in windows if w is not self]
+        for window in ordered:
+            window._reset_shutdown_requested = True
+
+        for window in ordered:
+            if not getattr(window, "_closing_complete", False):
+                try:
+                    window.close()
+                except Exception:
+                    pass
+
+        self._continue_reset_shutdown(reset_dialog)
+
+    def _continue_reset_shutdown(self, reset_dialog):
+        """Wait for approved worker cancellation/close events, or abort on a veto."""
+        app = QApplication.instance()
+        if app is None:
+            return
+        live = [w for w in list(MainWindow._open_windows)
+                if not getattr(w, "_closing_complete", False)]
+        pending = [w for w in live if getattr(w, "_close_after_cancel", False)]
+        blocked = [w for w in live if not getattr(w, "_close_after_cancel", False)]
+
+        if pending:
+            QTimer.singleShot(250, lambda d=reset_dialog: self._continue_reset_shutdown(d))
+            return
+        if blocked:
+            for window in live:
+                window._reset_shutdown_requested = False
+            # If the original window closed before another detached window vetoed
+            # closing, hand the single-instance listener to one remaining window.
+            if not any(getattr(w, "_register_ipc", False) for w in live) and live:
+                live[0]._register_ipc = True
+                QTimer.singleShot(180, live[0]._setup_ipc_server)
+            app.setQuitOnLastWindowClosed(True)
+            is_ar = getattr(reset_dialog, "language", "en") == "ar"
+            QMessageBox.information(
+                live[0] if live else None,
+                "إعادة ضبط Engo" if is_ar else "Reset Engo",
+                "تم إلغاء إعادة الضبط لأن إحدى نوافذ Engo ما زالت مفتوحة. أغلقها ثم حاول مرة أخرى."
+                if is_ar else
+                "Reset was cancelled because an Engo window is still open. Close it and try again."
+            )
+            return
+
+        # All windows have closed. Preserve user content by only clearing QSettings
+        # and disposable caches; chat and lesson-board databases remain untouched.
+        failed_credentials = []
+        cache_errors = 0
+        try:
+            _removed, failed_credentials = reset_dialog._delete_provider_credentials()
+            cache_stats = reset_dialog._perform_cache_cleanup(None)
+            cache_errors = int(cache_stats.get("errors", 0))
+            self.settings.clear()
+            self.settings.sync()
+            if self.settings.allKeys():
+                raise RuntimeError("Some Engo preferences could not be cleared.")
+        except Exception as exc:
+            app.setQuitOnLastWindowClosed(True)
+            is_ar = getattr(reset_dialog, "language", "en") == "ar"
+            message = (f"تعذرت إعادة ضبط Engo بالكامل: {exc}" if is_ar
+                       else f"Could not complete the reset: {exc}")
+            QMessageBox.critical(None, "إعادة ضبط Engo" if is_ar else "Reset Engo", message)
+            return
+
+        # Launch without the old command-line document paths. A fresh process sees
+        # an empty QSettings profile and displays the welcome language/theme wizard.
+        is_compiled_app = bool(getattr(sys, "frozen", False) or globals().get("__compiled__"))
+        if is_compiled_app:
+            # Nuitka standalone builds may expose __compiled__ instead of the
+            # PyInstaller-style sys.frozen flag. In either case, relaunch the EXE
+            # itself without passing its path as an extra document argument.
+            executable = sys.executable
+            arguments = []
+            working_directory = str(Path(sys.executable).resolve().parent)
+        else:
+            executable = sys.executable
+            script_path = str(Path(sys.argv[0]).resolve())
+            arguments = [script_path]
+            working_directory = str(Path(script_path).parent)
+
+        try:
+            launch_result = QProcess.startDetached(executable, arguments, working_directory)
+            started = bool(launch_result[0]) if isinstance(launch_result, tuple) else bool(launch_result)
+        except Exception:
+            started = False
+
+        if not started:
+            is_ar = getattr(reset_dialog, "language", "en") == "ar"
+            details = ("تمت إعادة ضبط إعدادات Engo، لكن تعذرت إعادة التشغيل تلقائيًا. شغّل Engo يدويًا لعرض شاشات الترحيب."
+                       if is_ar else
+                       "Engo settings were reset, but automatic restart failed. Start Engo manually to see the welcome setup.")
+            if failed_credentials:
+                details += "\nتعذر التأكد من حذف بعض مفاتيح API." if is_ar else "\nSome API credentials could not be confirmed as deleted."
+            if cache_errors:
+                details += f"\nتعذر حذف {cache_errors} عنصر كاش." if is_ar else f"\n{cache_errors} cache item(s) could not be removed."
+            QMessageBox.warning(None, "إعادة ضبط Engo" if is_ar else "Reset Engo", details)
+            app.quit()
+            return
+
+        # No completion popup is needed: the relaunched application opens the
+        # welcome screens immediately after the old process exits.
+        app.quit()
 
     def _animate_theme_transition(self):
         """Cross-fade cached old-window snapshots over the newly themed UI.
@@ -1851,16 +1998,17 @@ class MainWindow(QMainWindow):
             QPushButton#aiPdfActions, QPushButton#aiFocusMode, QPushButton#aiRegionButton,
             QPushButton#aiClearAttachments, QPushButton#translationQuiet { background: #f8fafc; color: #2d3c52; border-color: #c8d2df; }
             QPushButton#aiPdfActions, QPushButton#aiExport, QPushButton#aiFocusMode,
-            QPushButton#aiSettings, QPushButton#aiChatSearch {
+            QPushButton#aiClosePanel, QPushButton#aiChatSearch {
                 background:#f7f9fc; color:#2c3e58; border:1px solid #bdcada;
                 border-radius:7px; font-weight:650;
             }
             QPushButton#aiPdfActions:hover, QPushButton#aiExport:hover, QPushButton#aiFocusMode:hover,
-            QPushButton#aiSettings:hover, QPushButton#aiChatSearch:hover {
+            QPushButton#aiClosePanel:hover, QPushButton#aiChatSearch:hover {
                 background:#e8eff9; color:#203957; border-color:#8fa9ce;
             }
+            QPushButton#aiClosePanel { font-size:20pt; font-weight:900; padding:0px; }
             QPushButton#aiPdfActions:pressed, QPushButton#aiExport:pressed, QPushButton#aiFocusMode:pressed,
-            QPushButton#aiSettings:pressed, QPushButton#aiChatSearch:pressed {
+            QPushButton#aiClosePanel:pressed, QPushButton#aiChatSearch:pressed {
                 background:#dbe7f6; border-color:#7d9bc6;
             }
             QPushButton#aiSelectRegion { background: #e7effd; color: #244c89; border-color: #a9c0e5; }
@@ -2161,7 +2309,7 @@ class MainWindow(QMainWindow):
             # Product and brand names are deliberately not translated.
             "Engo PDF Viewer & AI Study Agent": "Engo PDF Viewer & AI Study Agent", "Engo PDF": "Engo PDF", "ENGO": "ENGO",
             "ENGO · LIVE AI TEACHER": "ENGO · مدرس الذكاء الاصطناعي المباشر",
-            "Lesson with AI": "حصة صوتية مع AI", "Audio lesson with AI": "حصة صوتية مع AI", "Voice && AI Teacher": "Audio lesson with AI",
+            "Lesson with AI": "AI حصة صوتية مع", "Audio lesson with AI": "AI حصة صوتية مع", "Voice && AI Teacher": "Audio lesson with AI",
             "ENGO AI": "ENGO AI", "Engo AI Chat": "Engo AI · المحادثة",
             "Home": "الرئيسية", "Return to open PDFs": "العودة إلى ملفات PDF المفتوحة", "Return to open files": "العودة إلى الملفات المفتوحة",
             "Quick file browser": "متصفح الملفات السريع", "Browse files": "تصفح الملفات", "This PC": "هذا الكمبيوتر", "Go to parent folder": "الانتقال إلى المجلد الأب", "Choose folder…": "اختر مجلدًا…",
@@ -2176,7 +2324,7 @@ class MainWindow(QMainWindow):
             "Welcome back": "مرحبًا بعودتك", "Recent files": "الملفات الأخيرة",
             "Search": "بحث", "Save": "حفظ", "Open": "فتح", "Close": "إغلاق",
             "Select": "تحديد", "Hand": "يد", "Select text": "تحديد النص", "Highlight text": "تظليل النص", "Copy text": "نسخ النص",
-            "Audio lesson with AI": "حصة صوتية مع AI",
+            "Audio lesson with AI": "AI حصة صوتية مع",
             "Send": "إرسال", "Stop": "إيقاف", "PDF context": "سياق PDF",
             "Save As…": "حفظ باسم…", "Read latest": "اقرأ آخر إجابة",
             "Stop audio": "إيقاف الصوت", "Ask by voice": "اسأل بالصوت",
@@ -2189,7 +2337,7 @@ class MainWindow(QMainWindow):
             "Book · show two pages side by side; can be combined with Scroll": "ككتاب · عرض صفحتين جنبًا إلى جنب، ويمكن دمجه مع التمرير",
             "Unlink": "إلغاء الربط",
             "Fit width": "ملاءمة العرض", "Page Theme": "مظهر الصفحة",
-            "AI Chat": "محادثة AI", "Voice && AI Teacher": "المدرس الصوتي وAI",
+            "AI Chat": "AI محادثة مع", "Voice && AI Teacher": "المدرس الصوتي وAI",
             "Translate": "ترجمة", "Present": "عرض", "Full Screen": "ملء الشاشة",
             "Your PDF study assistant": "مساعدك الدراسي لملفات PDF",
             "PDF actions ▾": "إجراءات PDF ▾", "PDF actions": "إجراءات PDF",
@@ -3462,6 +3610,11 @@ class MainWindow(QMainWindow):
         QTextBrowser#teachBoardText, QTextBrowser#translationResult {{
             background:{t['input']}; color:{t['text']}; border-color:{t['border']}; }}
         QFrame#aiUserCard {{ background:{t['selection']}; border-color:{t['border_strong']}; }}
+        QFrame#aiSelectedPassageCard {{ background:{t['panel_alt']}; border:1px solid {t['border']}; border-radius:7px; }}
+        QLabel#aiSelectedPassageTitle {{ color:{t['accent']}; font-size:8pt; font-weight:800; }}
+        QLabel#aiSelectedPassagePreview {{ color:{t['text']}; background:transparent; padding:2px 0; }}
+        QToolButton#aiSelectedPassageJump {{ color:{t['accent']}; background:{t['raised']}; border:1px solid {t['border']}; border-radius:5px; padding:3px 7px; font-weight:650; }}
+        QToolButton#aiSelectedPassageJump:hover {{ background:{t['hover']}; border-color:{t['accent']}; }}
         QFrame#aiPendingCard, QFrame#aiPendingSelectedText, QFrame#translationSource {{
             background:{t['panel_alt']}; border-color:{t['border']}; }}
         QTabBar#documentTabBar::tab {{ background:{t['panel_alt']}; color:{t['muted']}; border-color:{t['border']}; }}
@@ -3681,8 +3834,6 @@ class MainWindow(QMainWindow):
                     chat.export_btn.setIcon(make_icon("export", chat_icon_color, 15))
                 if hasattr(chat, "focus_mode_btn"):
                     chat.focus_mode_btn.setIcon(make_icon("fullscreen", chat_icon_color, 16))
-                if hasattr(chat, "settings_btn"):
-                    chat.settings_btn.setIcon(make_icon("settings", chat_icon_color, 16))
                 if hasattr(chat, "chat_search_btn"):
                     chat.chat_search_btn.setIcon(make_icon("search", chat_icon_color, 15))
                 if hasattr(chat, "voice_btn"):
@@ -3806,7 +3957,7 @@ class MainWindow(QMainWindow):
             "sidebar": "الشريط الجانبي", "continuous": "تمرير", "book": book_caption,
             "zoom_out": "تصغير", "zoom_in": "تكبير", "fit_width": "ملاءمة العرض",
             "fit_page": "ملاءمة الصفحة", "previous": "السابق", "next": "التالي", "rotate": "تدوير",
-            "theme": "مظهر الصفحة", "ai": "محادثة AI", "tutor": "حصة صوتية مع AI",
+            "theme": "مظهر الصفحة", "ai": "AI محادثة مع", "tutor": "AI حصة صوتية مع",
             "translate": "ترجمة", "present": "عرض", "full": "ملء الشاشة",
         } if is_arabic_ui else {
             "open": "Home", "save": "Save", "search": "Search",
@@ -3821,7 +3972,7 @@ class MainWindow(QMainWindow):
             "sidebar": "صفحات", "continuous": "تمرير", "book": book_caption,
             "zoom_out": "", "zoom_in": "", "fit_width": "عرض", "fit_page": "صفحة",
             "previous": "سابق", "next": "التالي", "rotate": "تدوير",
-            "theme": "ثيم", "ai": "AI", "tutor": "حصة صوتية مع AI", "translate": "ترجمة",
+            "theme": "ثيم", "ai": "AI محادثة مع", "tutor": "AI حصة صوتية مع", "translate": "ترجمة",
             "present": "عرض", "full": "ملء",
         } if is_arabic_ui else {
             "open": "Home", "save": "Save", "search": "Search",
@@ -3909,7 +4060,12 @@ class MainWindow(QMainWindow):
 
         # Keep the teacher button caption governed by the same width-fitting
         # pass as every other toolbar action. Do not force it back after fitting.
-        self.live_tutor_btn.setAccessibleName("حصة صوتية مع AI" if is_arabic_ui else "Audio lesson with AI")
+        self.ai_chat_btn.setAccessibleName("AI محادثة مع" if is_arabic_ui else "AI Chat")
+        self.live_tutor_btn.setAccessibleName("AI حصة صوتية مع" if is_arabic_ui else "Audio lesson with AI")
+        # Preserve the requested mixed Arabic/Latin caption order instead of letting
+        # inherited RTL layout reverse the punctuation and the leading "ai" token.
+        for ai_caption_button in (self.ai_chat_btn, self.live_tutor_btn):
+            ai_caption_button.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
 
         # Keep groups compact on ordinary screens, but distribute the available
         # breathing room between groups on wide/4K logical work areas.  This keeps
@@ -3985,8 +4141,9 @@ class MainWindow(QMainWindow):
         self.zoom_out_btn.setToolTip("Zoom out (Ctrl + mouse wheel down / Ctrl+-)")
         self.zoom_in_btn.setToolTip("Zoom in (Ctrl + mouse wheel up / touchpad pinch). Mouse wheel without Ctrl turns pages.")
         self.translate_btn.setAccessibleName("Translate selected PDF area inside Engo")
-        self.live_tutor_btn.setAccessibleName("حصة صوتية مع AI" if is_arabic_ui else "Audio lesson with AI")
-        self.live_tutor_btn.setToolTip("حصة صوتية مع AI · شرح صوتي مباشر للصفحة" if is_arabic_ui else "Audio lesson with AI · open the live spoken AI teacher")
+        self.live_tutor_btn.setAccessibleName("AI حصة صوتية مع" if is_arabic_ui else "Audio lesson with AI")
+        self.live_tutor_btn.setToolTip("AI حصة صوتية مع · شرح صوتي مباشر للصفحة" if is_arabic_ui else "Audio lesson with AI · open the live spoken AI teacher")
+        self.ai_chat_btn.setAccessibleName("AI محادثة مع" if is_arabic_ui else "AI Chat")
         self.search_btn.setToolTip("Search this entire PDF · exact text or AI search for concepts, handwriting, and images")
         save_tip_source = "Save changes · use the arrow for Save As"
         save_tip = _engo_translate_tooltip(save_tip_source, "ar" if is_arabic_ui else "en")
@@ -4527,10 +4684,22 @@ class MainWindow(QMainWindow):
                 self._on_translate_region_selected(t, page_index, data, clip, selected_text))
 
     def _detach_document_tab(self, tab):
-        """Remove a live document widget from this window without closing its PDF."""
+        """Remove a live document widget from this window without closing its PDF.
+
+        This is a MOVE operation, not a close operation.  The DocumentTab must
+        remain alive so the destination window can adopt the exact same widget
+        and preserve its loaded document, page, zoom, annotations and history.
+        """
         index = self.tabs.indexOf(tab)
         if index < 0:
             return False
+        # Stop drag polling and discard any references held by the source tabbar
+        # before the widget is removed/reparented.  Otherwise paintEvent can try
+        # to query a QWidget that has already been destroyed by another path.
+        try:
+            self.doc_tabbar.forget_tab(tab)
+        except (AttributeError, RuntimeError):
+            pass
         old_current = self.doc_tabbar.currentIndex()
         self._unlink_document_relationships(tab)
         for signal in (tab.currentPageChanged, tab.documentChanged, tab.titleChanged,
@@ -4555,13 +4724,11 @@ class MainWindow(QMainWindow):
         finally:
             self.doc_tabbar.blockSignals(bar_blocked)
             self.tabs.blockSignals(stack_blocked)
-        # This path permanently closes the tab; do not detach it with
-        # setParent(None), which briefly turns the live document widget into a
-        # top-level QWidgetWindow before Qt destroys it. That transient native
-        # window can trigger "QWidgetWindow ... must be a top level window" on
-        # Windows during subsequent popup/window processing.
-        tab.hide()
-        tab.deleteLater()
+        # QStackedWidget.removeWidget() hides the widget but deliberately does
+        # not destroy it.  Do NOT call deleteLater() here: _adopt_document_tab()
+        # in the receiving window reparents and inserts this same live widget.
+        # Also avoid setParent(None), which can briefly create a native
+        # QWidgetWindow on Windows while the tab is between its two stacks.
         if self.tabs.count():
             selected = min(max(0, old_current), self.tabs.count() - 1)
             self.doc_tabbar.setCurrentIndex(selected)
@@ -5858,6 +6025,7 @@ class MainWindow(QMainWindow):
                 "ai_checked": self.ai_chat_btn.isChecked(),
             }
         self._chat_focus_mode = True
+        self.ai_panel.hide_chat_content_for_transition()
         self.ai_panel.focus_mode_btn.setEnabled(False)
         self.setWindowTitle("Engo AI Chat")
         self.ai_panel.set_focus_mode_button(True)
@@ -5878,7 +6046,7 @@ class MainWindow(QMainWindow):
             self._chat_focus_transition_active = True
             self.workspace.setSizes([max(0, pane_total - chat_width), chat_width, 0])
             self._start_chat_focus_width_animation(
-                chat_width, pane_total, self._finish_chat_focus_enter, duration=720,
+                chat_width, pane_total, self._finish_chat_focus_enter, duration=520,
                 chrome_entering=True
             )
         else:
@@ -5906,6 +6074,7 @@ class MainWindow(QMainWindow):
         self._chat_focus_chrome_tracks = []
         pane_total = self._chat_focus_pane_width()
         self.workspace.setSizes([0, pane_total, 0])
+        self.ai_panel.reveal_chat_content(stagger_messages=True)
         self.ai_panel.prompt_edit.setFocus()
         self.ai_panel.focus_mode_btn.setEnabled(True)
         self._chat_focus_transition_active = False
@@ -5924,6 +6093,10 @@ class MainWindow(QMainWindow):
         self._stop_chat_focus_animations()
         saved = self._chat_focus_restore or {}
         self._chat_focus_mode = False
+        if animate:
+            self.ai_panel.animate_chat_content_close()
+        else:
+            self.ai_panel.hide_chat_content_for_transition()
         self.ai_panel.focus_mode_btn.setEnabled(False)
         self.setWindowTitle(str(saved.get("window_title") or APP_NAME))
         self.ai_panel.set_focus_mode_button(False)
@@ -5944,7 +6117,7 @@ class MainWindow(QMainWindow):
             self._chat_focus_transition_active = True
             self.workspace.setSizes([max(0, pane_total - live_chat_width), live_chat_width, 0])
             self._start_chat_focus_width_animation(
-                live_chat_width, chat_width, self._finish_chat_focus_exit, duration=720,
+                live_chat_width, chat_width, self._finish_chat_focus_exit, duration=520,
                 chrome_entering=False
             )
         else:
@@ -5968,6 +6141,7 @@ class MainWindow(QMainWindow):
             self.teach_board.show()
         else:
             self.teach_board.hide()
+        self.ai_panel.reveal_chat_content(stagger_messages=True)
 
         saved_sizes = saved.get("workspace_sizes") or []
         if len(saved_sizes) >= 3 and sum(max(0, int(v)) for v in saved_sizes[:3]) > 0:
@@ -6071,13 +6245,14 @@ class MainWindow(QMainWindow):
 
             panel.setMinimumWidth(0)
             panel.setMaximumWidth(0)
+            panel.prepare_chat_content_transition()
             panel.show()
             self.workspace.setSizes([max(1, total_width - board_width), 0, board_width])
             self.ai_chat_btn.setChecked(True)
 
-            self._chat_panel_anim_until = time.monotonic() + 0.210 + 0.35
+            self._chat_panel_anim_until = time.monotonic() + 0.240 + 0.32
             anim = QPropertyAnimation(panel, b"maximumWidth", self)
-            anim.setDuration(210)
+            anim.setDuration(240)
             anim.setStartValue(0)
             anim.setEndValue(chat_width)
             anim.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -6098,6 +6273,7 @@ class MainWindow(QMainWindow):
                     self._chat_panel_anim_until = 0.0
                     p.setMaximumWidth(720)
                     p.setMinimumWidth(405)
+                    p.reveal_chat_content(stagger_messages=True)
                     now = max(1, self.workspace.width())
                     self.workspace.setSizes([max(1, now - target - board), target, board])
                     p.prompt_edit.setFocus()
@@ -6129,9 +6305,10 @@ class MainWindow(QMainWindow):
                            if len(current_sizes) > 2 and self.teach_board.isVisible() else 0)
             panel.setMinimumWidth(0)
             panel.setMaximumWidth(start_width)
-            self._chat_panel_anim_until = time.monotonic() + 0.185 + 0.35
+            panel.animate_chat_content_close()
+            self._chat_panel_anim_until = time.monotonic() + 0.210 + 0.32
             anim = QPropertyAnimation(panel, b"maximumWidth", self)
-            anim.setDuration(185)
+            anim.setDuration(210)
             anim.setStartValue(start_width)
             anim.setEndValue(0)
             anim.setEasingCurve(QEasingCurve.Type.InCubic)
@@ -6558,7 +6735,7 @@ class MainWindow(QMainWindow):
             dialog.set_status("Google Gemini API key is missing.")
             QMessageBox.information(self, "Google Gemini key needed",
                 "Voice & Learn requires a Google Gemini API key with access to Gemini Live.\n\n"
-                "Open AI Chat → gear icon → Google Gemini → API key, save it, then start the conversation again.")
+                "Open Application Settings → AI settings → Google Gemini → API key, save it, then start the conversation again.")
             return
         model = str(self.settings.value("ai_model_gemini_live", "gemini-3.8-live", type=str) or "gemini-3.8-live")
         try:
@@ -6629,7 +6806,7 @@ class MainWindow(QMainWindow):
         worker.board_update.connect(dialog.update_board)
         worker.board_command.connect(dialog.apply_board_action)
         worker.focus_requested.connect(self._on_live_focus_requested)
-        worker.focus_clear_requested.connect(self._clear_live_focus_overlays)
+        worker.focus_clear_requested.connect(self._schedule_live_focus_clear)
         worker.teacher_arrow_requested.connect(self._on_live_teacher_arrow_overlay_requested)
         worker.page_navigation_requested.connect(lambda target, number, d=dialog: self._handle_live_tutor_navigation(target, number, d))
         worker.failed.connect(lambda message, d=dialog: self._on_live_tutor_failure(d, message))
@@ -6872,8 +7049,94 @@ class MainWindow(QMainWindow):
         if dialog is not None and hasattr(dialog, "clear_focus_regions"):
             dialog.clear_focus_regions()
 
+    def _schedule_live_focus_clear(self):
+        """Clear a finished voice target after its queued speech has actually played."""
+        generation = int(getattr(self, "_live_focus_generation", 0))
+        started_at = time.monotonic()
+        quiet_since = [None]
+
+        def poll_playback(token=generation):
+            if token != int(getattr(self, "_live_focus_generation", 0)):
+                return
+            current_worker = getattr(self, "_live_tutor_worker", None)
+            speaker_event = getattr(current_worker, "_speaker_playing_event", None)
+            speaker_queue = getattr(current_worker, "_speaker_queue", None)
+            try:
+                audio_busy = bool(speaker_event and speaker_event.is_set()) or bool(speaker_queue and not speaker_queue.empty())
+            except Exception:
+                audio_busy = False
+            if audio_busy:
+                quiet_since[0] = None
+                # Safety ceiling avoids a stale rectangle if an audio device fails.
+                if time.monotonic() - started_at < 75.0:
+                    QTimer.singleShot(180, poll_playback)
+                    return
+            if quiet_since[0] is None:
+                quiet_since[0] = time.monotonic()
+            if time.monotonic() - quiet_since[0] < 0.58 and time.monotonic() - started_at < 75.0:
+                QTimer.singleShot(140, poll_playback)
+                return
+            if token == int(getattr(self, "_live_focus_generation", 0)):
+                self._clear_live_focus_overlays()
+
+        QTimer.singleShot(580, poll_playback)
+
+    def jump_to_pdf_selection(self, path: str, page_index: int, normalized_box):
+        """Navigate to a PDF passage saved with a chat message and flash it yellow."""
+        tab = self._open_document_tab_by_path(path)
+        if tab is None or not getattr(tab, "page_count", 0):
+            is_ar = str(self.settings.value("interface_language", "en", type=str) or "en").lower().startswith("ar")
+            self.show_status("الملف الذي يحتوي على النص المحدد غير مفتوح" if is_ar else "The PDF containing this selected passage is not open")
+            return
+        try:
+            page_index = max(0, min(int(page_index), int(tab.page_count) - 1))
+            box = [max(0.0, min(1.0, float(v))) for v in normalized_box]
+            if len(box) != 4 or box[2] <= 0 or box[3] <= 0:
+                raise ValueError("invalid saved selection location")
+            box[2] = min(box[2], 1.0 - box[0])
+            box[3] = min(box[3], 1.0 - box[1])
+        except Exception:
+            self.show_status("تعذّر تحديد موضع النص المحفوظ" if str(self.settings.value("interface_language", "en", type=str) or "en").lower().startswith("ar") else "Could not resolve the saved text location")
+            return
+        tab_index = self.tabs.indexOf(tab)
+        if tab_index >= 0:
+            self.tabs.setCurrentWidget(tab)
+            try:
+                self.doc_tabbar.setCurrentIndex(tab_index)
+            except Exception:
+                pass
+        tab.go_to_page(page_index)
+        canvas = tab.canvas
+        canvas.set_temporary_selection_highlight(page_index, box)
+
+        def scroll_to_passage():
+            try:
+                active_canvas = tab.canvas
+                scroll = getattr(active_canvas, "display_scroll", None) or tab.scroll
+                rect = active_canvas.page_rects.get(page_index)
+                if rect is None:
+                    tab._relayout()
+                    rect = active_canvas.page_rects.get(page_index)
+                if rect is None:
+                    return
+                viewport = scroll.viewport()
+                center_x = rect.left() + (box[0] + box[2] / 2.0) * rect.width()
+                center_y = rect.top() + (box[1] + box[3] / 2.0) * rect.height()
+                scroll.verticalScrollBar().setValue(round(center_y - viewport.height() * 0.38))
+                if rect.width() > viewport.width():
+                    scroll.horizontalScrollBar().setValue(round(center_x - viewport.width() * 0.5))
+                else:
+                    scroll.horizontalScrollBar().setValue(0)
+                active_canvas.update()
+            except (RuntimeError, AttributeError):
+                pass
+
+        QTimer.singleShot(100, scroll_to_passage)
+        self.show_status("تم الانتقال إلى النص المحدد" if str(self.settings.value("interface_language", "en", type=str) or "en").lower().startswith("ar") else "Jumped to the selected passage")
+
     def _on_live_focus_requested(self, page_index: int, box, label: str, kind: str = "text", source: str = "primary"):
         """Show the current tutor target and scroll the real PDF viewport to it."""
+        self._live_focus_generation = int(getattr(self, "_live_focus_generation", 0)) + 1
         worker = self._live_tutor_worker
         if worker is None:
             return
@@ -7478,7 +7741,7 @@ class MainWindow(QMainWindow):
         api_key = _get_provider_key(self.settings, provider)
         if not api_key:
             self.ai_panel.append_message_for(path, "assistant",
-                f"No API key is configured for {AI_PROVIDER_LABELS.get(provider, provider)}. Open the gear icon, add the key, then send your question again.")
+                f"No API key is configured for {AI_PROVIDER_LABELS.get(provider, provider)}. Open Application Settings → AI settings, add the key, then send your question again.")
             self.ai_panel.set_busy(False)
             return
         model = str(self.ai_panel.model_combo.currentData() or self.ai_panel.model_combo.currentText() or
@@ -8533,6 +8796,13 @@ class MainWindow(QMainWindow):
         stack_blocker = QSignalBlocker(self.tabs)
         for current_index, target in sorted(indexed, key=lambda pair: pair[0], reverse=True):
             if isinstance(target, DocumentTab):
+                # A close can race with the tabbar's drag-paint timer.  Clear
+                # references before close_document()/deleteLater() invalidate
+                # the underlying C++ QWidget.
+                try:
+                    self.doc_tabbar.forget_tab(target)
+                except (AttributeError, RuntimeError):
+                    pass
                 target.close_document()
             self.tabs.removeWidget(target)
             if target in self._tab_order:
@@ -8854,7 +9124,7 @@ class MainWindow(QMainWindow):
                 "chat_search_close_btn": ("أغلق البحث داخل المحادثة.", "Close conversation search."),
                 "jump_bottom_btn": ("انتقل مباشرة إلى أحدث رسالة.", "Jump to the latest message."),
                 "focus_mode_btn": ("وسّع مساحة المحادثة وأخفِ بقية واجهة البرنامج.", "Expand the chat and hide the rest of the application interface."),
-                "settings_btn": ("افتح إعدادات مزوّدي الذكاء الاصطناعي والنماذج.", "Open AI provider and model settings."),
+                "close_panel_btn": ("أغلق قسم محادثة AI.", "Close the AI chat panel."),
                 "pdf_actions_btn": ("لخّص ملف PDF أو اطلب مراجعة الصفحة الحالية.", "Summarize the PDF or ask for a review of the current page."),
                 "prompt_edit": ("اكتب سؤالك هنا. Enter للإرسال وShift+Enter لسطر جديد.", "Type your question here. Enter sends; Shift+Enter inserts a new line."),
                 "add_image_btn": ("أرفق صورة من جهازك أو الصق صورة من الحافظة داخل المحادثة.", "Attach an image from your device or paste one from the clipboard."),
@@ -8970,7 +9240,7 @@ class MainWindow(QMainWindow):
             "chat_search_btn", "chat_search_prev_btn", "chat_search_next_btn",
             "chat_search_close_btn", "chat_search_edit", "jump_bottom_btn",
             "clear_attachment_btn", "remove_pending_selected_text_btn",
-            "focus_mode_btn", "settings_btn", "document_label", "prompt_edit",
+            "focus_mode_btn", "close_panel_btn", "document_label", "prompt_edit",
             "add_image_btn", "add_region_btn", "attachment_menu_btn", "remove_pending_selected_text_btn",
         )
         node = watched
@@ -9534,7 +9804,9 @@ class MainWindow(QMainWindow):
                 self.tabs.setCurrentIndex(active_index)
         if session_view_target is not None:
             self._linked_view_target = session_view_target
-        self._save_last_session()
+        reset_shutdown = bool(getattr(self, "_reset_shutdown_requested", False))
+        if not reset_shutdown:
+            self._save_last_session()
         for i in range(self.tabs.count()):
             tab = self.tabs.widget(i)
             if isinstance(tab, DocumentTab):
@@ -9547,7 +9819,7 @@ class MainWindow(QMainWindow):
         self._closing_complete = True
         if self in MainWindow._open_windows:
             MainWindow._open_windows.remove(self)
-        if MainWindow._open_windows:
+        if MainWindow._open_windows and not reset_shutdown:
             QTimer.singleShot(2200, MainWindow._refresh_session_after_window_close)
         # If the original single-instance window is closed while a detached
         # document window remains, hand the local IPC listener to that window.
@@ -9561,7 +9833,7 @@ class MainWindow(QMainWindow):
             QLocalServer.removeServer(IPC_SERVER_NAME)
             self._register_ipc = False
             candidates = [window for window in MainWindow._open_windows if not window.isHidden()]
-            if candidates:
+            if candidates and not reset_shutdown:
                 successor = candidates[0]
                 successor._register_ipc = True
                 QTimer.singleShot(180, successor._setup_ipc_server)

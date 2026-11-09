@@ -1,0 +1,19 @@
+Engo PDF Viewer v17 - Live lesson button language fix
+
+Changed file:
+- engo_live.py
+
+The "Start full-page lesson" button now follows interface_language consistently:
+- Arabic, idle: ابدأ شرح الصفحة بالكامل
+- English, idle: Start full-page lesson
+- Arabic, active: الشرح جارٍ
+- English, active: Conversation active
+
+The button caption, tooltip, and accessible name update both when the dialog is initialized / its language-theme refresh runs and whenever session state changes. This prevents the button from switching to English after clicking or after the lesson state changes.
+
+Also included in the full-project archive:
+- Latest Arabic button wording for AI settings row (Ai فتح اعدادات)
+- AI settings ComboBox mouse-wheel protection
+
+Validation performed: Python syntax compilation and archive integrity checks.
+A live PyQt/Windows UI test was not possible in this environment.

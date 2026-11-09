@@ -1,0 +1,6 @@
+First-run welcome heading — 2026-11-09
+
+Updated the first-run setup hero title to the exact requested text:
+Welcome to (Engo) مرحبًا بك في
+
+No other first-run labels, translations, or setup behavior were changed.

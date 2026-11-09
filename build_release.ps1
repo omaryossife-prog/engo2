@@ -664,12 +664,13 @@ try {
     $IconPath = Join-Path $ProjectRoot 'engopdfviewer.ico'
     $CheckboxPath = Join-Path $ProjectRoot 'checkbox_checked.png'
     $ChevronPath = Join-Path $ProjectRoot 'combo_chevron_light.png'
+    $ChevronDarkPath = Join-Path $ProjectRoot 'combo_chevron_dark.png'
     $ChevronUpLightPath = Join-Path $ProjectRoot 'combo_chevron_up_light.png'
     $ChevronUpDarkPath = Join-Path $ProjectRoot 'combo_chevron_up_dark.png'
     $GuidePath = Join-Path $ProjectRoot 'ENGO_PROGRAM_GUIDE.md'
     $NsisScript = Join-Path $ProjectRoot 'installer\EngoInstaller.nsi'
     Write-LogLine '[STAGE START] Validate required source files and installer script'
-    foreach ($Required in @($MainPath, $RequirementsPath, $IconPath, $CheckboxPath, $ChevronPath, $ChevronUpLightPath, $ChevronUpDarkPath, $GuidePath, $NsisScript)) {
+    foreach ($Required in @($MainPath, $RequirementsPath, $IconPath, $CheckboxPath, $ChevronPath, $ChevronDarkPath, $ChevronUpLightPath, $ChevronUpDarkPath, $GuidePath, $NsisScript)) {
         if (-not (Test-Path -LiteralPath $Required)) { throw "Required project file is missing: $Required" }
         Write-LogLine "[FILE OK] $Required"
     }
@@ -980,6 +981,7 @@ VSVersionInfo(
     [void]$NuitkaArgs.Add(('--include-data-files={0}=engopdfviewer.ico' -f $IconPath))
     [void]$NuitkaArgs.Add(('--include-data-files={0}=checkbox_checked.png' -f $CheckboxPath))
     [void]$NuitkaArgs.Add(('--include-data-files={0}=combo_chevron_light.png' -f $ChevronPath))
+    [void]$NuitkaArgs.Add(('--include-data-files={0}=combo_chevron_dark.png' -f $ChevronDarkPath))
     [void]$NuitkaArgs.Add(('--include-data-files={0}=combo_chevron_up_light.png' -f $ChevronUpLightPath))
     [void]$NuitkaArgs.Add(('--include-data-files={0}=combo_chevron_up_dark.png' -f $ChevronUpDarkPath))
     [void]$NuitkaArgs.Add(('--include-data-files={0}=ENGO_PROGRAM_GUIDE.md' -f $GuidePath))

@@ -1,0 +1,309 @@
+--- a/engo_app_dialogs.py
++++ b/engo_app_dialogs.py
+@@ -24,6 +24,7 @@
+     DEFAULT_BG,
+     DEFAULT_INK,
+     _engo_apply_dialog_consistency,
++    _engo_apply_windows_caption_theme,
+     engo_ui_theme_tokens,
+     is_supported_document,
+     normalize_ui_theme,
+@@ -494,6 +495,9 @@
+         super().__init__(parent)
+         self.selected_language = None
+         self.selected_theme = None
++        self._preview_theme = "dark"
++        self._theme_transition_animation = None
++        self.setProperty("engoOwnThemePreview", True)
+         self.setObjectName("firstRunSetupDialog")
+         self.setWindowTitle("Welcome to Engo · First-time setup")
+         self.setModal(True)
+@@ -516,9 +520,9 @@
+         mark.setFixedSize(48, 48)
+         copy = QVBoxLayout()
+         copy.setSpacing(2)
+-        title = QLabel("Welcome to Engo · مرحبًا بك في Engo")
++        title = QLabel("Welcome to Engo · مرحبًا بك")
+         title.setObjectName("firstRunTitle")
+-        subtitle = QLabel("Let's set up your study space in two quick steps.")
++        subtitle = QLabel("Let's set up your study space in two quick steps")
+         subtitle.setObjectName("firstRunSubtitle")
+         copy.addWidget(title)
+         copy.addWidget(subtitle)
+@@ -530,10 +534,14 @@
+         self.step_label.setObjectName("firstRunStep")
+         root.addWidget(self.step_label)
+         self.stack = QStackedWidget(self)
++        self.stack.setObjectName("firstRunStack")
+         root.addWidget(self.stack, 1)
+ 
+         # Step one: language selection.
+         language_page = QWidget()
++        language_page.setObjectName("firstRunLanguagePage")
++        language_page.setAutoFillBackground(True)
++        self.language_page = language_page
+         language_layout = QVBoxLayout(language_page)
+         language_layout.setContentsMargins(4, 4, 4, 4)
+         language_layout.setSpacing(12)
+@@ -569,6 +577,9 @@
+ 
+         # Step two: visual theme selection.
+         theme_page = QWidget()
++        theme_page.setObjectName("firstRunThemePage")
++        theme_page.setAutoFillBackground(True)
++        self.theme_page = theme_page
+         theme_layout = QVBoxLayout(theme_page)
+         theme_layout.setContentsMargins(4, 4, 4, 4)
+         theme_layout.setSpacing(11)
+@@ -579,6 +590,9 @@
+         theme_layout.addWidget(self.theme_heading)
+         theme_layout.addWidget(self.theme_caption)
+         theme_cards_widget = QWidget(theme_page)
++        theme_cards_widget.setObjectName("firstRunThemeCards")
++        theme_cards_widget.setAutoFillBackground(True)
++        self.theme_cards_widget = theme_cards_widget
+         theme_cards = QGridLayout(theme_cards_widget)
+         theme_cards.setContentsMargins(0, 0, 0, 0)
+         theme_cards.setHorizontalSpacing(8)
+@@ -617,7 +631,7 @@
+         footer.addWidget(self.next_button)
+         root.addLayout(footer)
+         self._apply_wizard_language("en")
+-        self._apply_wizard_style()
++        self._apply_wizard_style(self._preview_theme)
+ 
+     def _choose_language(self, code):
+         self.selected_language = code
+@@ -626,10 +640,41 @@
+         self.next_button.setEnabled(True)
+ 
+     def _choose_theme(self, theme):
+-        self.selected_theme = theme
++        self.selected_theme = normalize_ui_theme(theme)
+         for key, card in self.theme_cards.items():
+-            card.setChecked(key == theme)
++            card.setChecked(key == self.selected_theme)
+         self.next_button.setEnabled(True)
++        self._animate_theme_preview(self.selected_theme)
++
++    def _animate_theme_preview(self, theme):
++        """Quickly fade the wizard while applying the chosen live theme preview."""
++        theme = normalize_ui_theme(theme)
++        old_animation = self._theme_transition_animation
++        if old_animation is not None:
++            try:
++                old_animation.stop()
++            except RuntimeError:
++                pass
++        fade_out = QPropertyAnimation(self, b"windowOpacity", self)
++        fade_out.setDuration(75)
++        fade_out.setEasingCurve(QEasingCurve.Type.OutCubic)
++        fade_out.setStartValue(float(self.windowOpacity()))
++        fade_out.setEndValue(0.76)
++        self._theme_transition_animation = fade_out
++
++        def apply_and_fade_back():
++            self._apply_wizard_style(theme)
++            fade_in = QPropertyAnimation(self, b"windowOpacity", self)
++            fade_in.setDuration(115)
++            fade_in.setEasingCurve(QEasingCurve.Type.OutCubic)
++            fade_in.setStartValue(float(self.windowOpacity()))
++            fade_in.setEndValue(1.0)
++            self._theme_transition_animation = fade_in
++            fade_in.finished.connect(lambda: setattr(self, "_theme_transition_animation", None))
++            fade_in.start()
++
++        fade_out.finished.connect(apply_and_fade_back)
++        fade_out.start()
+ 
+     def _apply_wizard_language(self, language):
+         is_ar = language == "ar"
+@@ -690,28 +735,83 @@
+     def closeEvent(self, event):
+         event.ignore()
+ 
+-    def _apply_wizard_style(self):
+-        self.setStyleSheet("""
+-            QDialog#firstRunSetupDialog { background:#eef2f7; color:#25364d; }
+-            QFrame#firstRunHero { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #ffffff,stop:1 #e5edf8); border:1px solid #cbd6e5; border-left:4px solid #3269d8; border-radius:14px; }
+-            QLabel#firstRunMark { background:#3269d8; color:white; border-radius:12px; font-size:22pt; font-weight:850; }
+-            QLabel#firstRunTitle { color:#20334f; font-size:15pt; font-weight:850; }
+-            QLabel#firstRunSubtitle { color:#63748d; font-size:9pt; }
+-            QLabel#firstRunStep { color:#3269d8; font-size:8pt; font-weight:850; letter-spacing:1px; padding:2px 4px; }
+-            QLabel#firstRunPageTitle { color:#22344d; font-size:15pt; font-weight:800; }
+-            QLabel#firstRunPageCaption { color:#687990; font-size:9pt; }
+-            QToolButton#firstRunLanguageCard { background:#ffffff; color:#263b59; border:1px solid #cbd6e5; border-radius:12px; font-size:14pt; font-weight:800; padding:16px; }
+-            QToolButton#firstRunLanguageCard:hover { background:#f2f6fc; border-color:#91acd2; }
+-            QToolButton#firstRunLanguageCard:checked { background:#e8f0ff; color:#1d4f9c; border:2px solid #3269d8; }
+-            QToolButton#themePreviewCard { background:#ffffff; color:#26364d; border:1px solid #cbd6e5; border-radius:10px; padding:7px; font-size:9pt; font-weight:800; }
+-            QToolButton#themePreviewCard:hover { background:#f2f6fc; border-color:#91acd2; }
+-            QToolButton#themePreviewCard:checked { background:#e8f0ff; color:#1d4f9c; border:2px solid #3269d8; }
+-            QPushButton#firstRunPrimary { background:#3269d8; color:#ffffff; border:1px solid #2459c2; border-radius:8px; padding:9px 18px; min-width:150px; min-height:34px; font-weight:800; }
+-            QPushButton#firstRunPrimary:hover:enabled { background:#245bc7; }
+-            QPushButton#firstRunPrimary:disabled { background:#d7dfeb; color:#8b98aa; border-color:#d0d8e3; }
+-            QPushButton#firstRunSecondary { background:#ffffff; color:#34445b; border:1px solid #c6d0de; border-radius:8px; padding:8px 15px; min-height:34px; font-weight:700; }
+-            QPushButton#firstRunSecondary:hover { background:#e8eef7; }
++    def _apply_wizard_style(self, theme=None):
++        """Apply one complete, high-contrast palette to every first-run surface."""
++        theme = normalize_ui_theme(theme or self._preview_theme)
++        self._preview_theme = theme
++        c = engo_ui_theme_tokens(theme)
++        # Accent hues differ in brightness across palettes. Use the higher-contrast
++        # foreground for primary actions instead of forcing white on pale accents.
++        accent_text = "#ffffff" if theme == "light" else "#17202b"
++
++        palette = QPalette(self.palette())
++        palette_roles = {
++            QPalette.ColorRole.Window: c["window"],
++            QPalette.ColorRole.WindowText: c["text"],
++            QPalette.ColorRole.Base: c["input"],
++            QPalette.ColorRole.AlternateBase: c["panel"],
++            QPalette.ColorRole.Text: c["text"],
++            QPalette.ColorRole.Button: c["raised"],
++            QPalette.ColorRole.ButtonText: c["text"],
++            QPalette.ColorRole.Highlight: c["selection"],
++            QPalette.ColorRole.HighlightedText: c["selection_text"],
++            QPalette.ColorRole.ToolTipBase: c["panel"],
++            QPalette.ColorRole.ToolTipText: c["text"],
++            QPalette.ColorRole.PlaceholderText: c["muted"],
++        }
++        for role, color in palette_roles.items():
++            palette.setColor(role, QColor(color))
++        self.setPalette(palette)
++        self.setAutoFillBackground(True)
++        for widget in (self.stack, self.language_page, self.theme_page, self.theme_cards_widget):
++            widget.setPalette(palette)
++            widget.setAutoFillBackground(True)
++
++        self.setStyleSheet(f"""
++            QDialog#firstRunSetupDialog {{ background:{c['window']}; color:{c['text']}; }}
++            QDialog#firstRunSetupDialog QWidget {{ color:{c['text']}; }}
++            QStackedWidget#firstRunStack {{ background:{c['panel']}; border:1px solid {c['border']}; border-radius:12px; }}
++            QWidget#firstRunLanguagePage, QWidget#firstRunThemePage, QWidget#firstRunThemeCards {{
++                background:{c['panel']}; color:{c['text']};
++            }}
++            QFrame#firstRunHero {{ background:{c['panel_alt']}; border:1px solid {c['border']};
++                border-left:4px solid {c['accent']}; border-radius:14px; }}
++            QLabel#firstRunMark {{ background:{c['accent']}; color:#ffffff; border-radius:12px;
++                font-size:22pt; font-weight:850; }}
++            QLabel#firstRunTitle {{ color:{c['text']}; font-size:15pt; font-weight:850; }}
++            QLabel#firstRunSubtitle {{ color:{c['muted']}; font-size:9pt; }}
++            QLabel#firstRunStep {{ color:{c['accent']}; font-size:8pt; font-weight:850;
++                letter-spacing:1px; padding:2px 4px; }}
++            QLabel#firstRunPageTitle {{ color:{c['text']}; font-size:15pt; font-weight:800; }}
++            QLabel#firstRunPageCaption {{ color:{c['muted']}; font-size:9pt; }}
++            QToolButton#firstRunLanguageCard {{ background:{c['card']}; color:{c['text']};
++                border:1px solid {c['border']}; border-radius:12px; font-size:14pt;
++                font-weight:800; padding:16px; }}
++            QToolButton#firstRunLanguageCard:hover {{ background:{c['hover']}; border-color:{c['accent']}; }}
++            QToolButton#firstRunLanguageCard:checked {{ background:{c['selection']};
++                color:{c['selection_text']}; border:2px solid {c['accent']}; }}
++            QToolButton#themePreviewCard {{ background:{c['card']}; color:{c['text']};
++                border:1px solid {c['border']}; border-radius:10px; padding:7px;
++                font-size:9pt; font-weight:800; }}
++            QToolButton#themePreviewCard:hover {{ background:{c['hover']}; border-color:{c['accent']}; }}
++            QToolButton#themePreviewCard:checked {{ background:{c['selection']};
++                color:{c['selection_text']}; border:2px solid {c['accent']}; }}
++            QPushButton#firstRunPrimary {{ background:{c['accent']}; color:{accent_text};
++                border:1px solid {c['accent']}; border-radius:8px; padding:9px 18px;
++                min-width:150px; min-height:34px; font-weight:800; }}
++            QPushButton#firstRunPrimary:hover:enabled {{ background:{c['accent_hover']}; color:{accent_text}; }}
++            QPushButton#firstRunPrimary:disabled {{ background:{c['raised']}; color:{c['muted']};
++                border-color:{c['border']}; }}
++            QPushButton#firstRunSecondary {{ background:{c['raised']}; color:{c['text']};
++                border:1px solid {c['border']}; border-radius:8px; padding:8px 15px;
++                min-height:34px; font-weight:700; }}
++            QPushButton#firstRunSecondary:hover {{ background:{c['hover']}; border-color:{c['accent']}; }}
+         """)
++        # Keep the real Windows caption and native window controls in sync with
++        # the same live preview palette (Qt stylesheets cannot paint the caption).
++        _engo_apply_windows_caption_theme(self, theme)
++        QTimer.singleShot(80, lambda obj=self, current=theme:
++                          _engo_apply_windows_caption_theme(obj, current))
+ 
+ 
+ class _SettingsNoWheelSlider(QSlider):
+--- a/engo_base.py
++++ b/engo_base.py
+@@ -825,8 +825,15 @@
+         try:
+             if event.type() == QEvent.Type.Show:
+                 if isinstance(watched, QDialog):
+-                    _engo_apply_dialog_consistency(watched)
+-                    QTimer.singleShot(0, lambda obj=watched: _engo_apply_dialog_consistency(obj))
++                    # The first-run wizard previews six complete palettes before
++                    # the user commits one. Its own theme-aware stylesheet/palette
++                    # must not be overwritten by the app's not-yet-configured theme.
++                    if not bool(watched.property("engoOwnThemePreview")):
++                        _engo_apply_dialog_consistency(watched)
++                        QTimer.singleShot(0, lambda obj=watched: (
++                            _engo_apply_dialog_consistency(obj)
++                            if not bool(obj.property("engoOwnThemePreview")) else None
++                        ))
+                 elif isinstance(watched, QMenu):
+                     _engo_apply_menu_consistency(watched)
+                     QTimer.singleShot(0, lambda obj=watched: _engo_apply_menu_consistency(obj))
+--- a/engo_document.py
++++ b/engo_document.py
+@@ -1036,6 +1036,17 @@
+                             for handle in geometry.get("handles", []):
+                                 point = handle.get("point", QPointF())
+                                 if handle.get("name") == "scale":
++                                    # Fifth, diagonal grip scales both axes equally.
++                                    center = bounds.center()
++                                    vx, vy = point.x() - center.x(), point.y() - center.y()
++                                    rx, ry = max(1.0, bounds.width() / 2.0), max(1.0, bounds.height() / 2.0)
++                                    denom = math.sqrt((vx / rx) ** 2 + (vy / ry) ** 2)
++                                    if denom > 1e-6:
++                                        edge = QPointF(center.x() + vx / denom, center.y() + vy / denom)
++                                        painter.setPen(QPen(QColor("#8eb8ff"), 1.3, Qt.PenStyle.SolidLine))
++                                        painter.drawLine(edge, point)
++                                        painter.setPen(QPen(QColor("#eaf2ff"), 1.0))
++                                        painter.setBrush(QBrush(QColor("#5b9cff")))
+                                     painter.save()
+                                     painter.translate(point)
+                                     painter.rotate(45)
+@@ -1794,17 +1805,16 @@
+             shape_label = str((annot.info or {}).get("content") or "").lower()
+             is_point = "pen shape · point" in shape_label or "pen shape - point" in shape_label
+             if not is_point:
+-                shape_info = dict(annot.info or {})
+-                is_pen_circle = (str(shape_info.get("title") or "").strip().lower() == "engo pen shape"
+-                                 or "pen shape" in shape_label)
+-                if not is_pen_circle:
+-                    cx, cy = bounds.center().x(), bounds.center().y()
+-                    handles = [
+-                        {"name": "p0", "point": QPointF(cx, bounds.top()), "anchor": QPointF(cx, cy), "mode": "circle_axis", "axis": "vertical"},
+-                        {"name": "p1", "point": QPointF(bounds.right(), cy), "anchor": QPointF(cx, cy), "mode": "circle_axis", "axis": "horizontal"},
+-                        {"name": "p2", "point": QPointF(cx, bounds.bottom()), "anchor": QPointF(cx, cy), "mode": "circle_axis", "axis": "vertical"},
+-                        {"name": "p3", "point": QPointF(bounds.left(), cy), "anchor": QPointF(cx, cy), "mode": "circle_axis", "axis": "horizontal"},
+-                    ]
++                # Every editable ellipse, including one recognized from a Pen
++                # stroke, gets four axis grips plus the shared diagonal scale grip
++                # added below. This makes a circle freely widen/narrow into an oval.
++                cx, cy = bounds.center().x(), bounds.center().y()
++                handles = [
++                    {"name": "p0", "point": QPointF(cx, bounds.top()), "anchor": QPointF(cx, cy), "mode": "circle_axis", "axis": "vertical"},
++                    {"name": "p1", "point": QPointF(bounds.right(), cy), "anchor": QPointF(cx, cy), "mode": "circle_axis", "axis": "horizontal"},
++                    {"name": "p2", "point": QPointF(cx, bounds.bottom()), "anchor": QPointF(cx, cy), "mode": "circle_axis", "axis": "vertical"},
++                    {"name": "p3", "point": QPointF(bounds.left(), cy), "anchor": QPointF(cx, cy), "mode": "circle_axis", "axis": "horizontal"},
++                ]
+         elif subtype == type_highlight and len(raw_vertices) >= 4:
+             kind, closed = "highlight", True
+             display_vertices = [to_display(point) for point in raw_vertices]
+--- a/engo_widgets.py
++++ b/engo_widgets.py
+@@ -2054,8 +2054,12 @@
+     ) if len(simplified) >= 3 else 0.0
+     closed_path_length = path_len + endpoint
+     curve_excess = (closed_path_length / max(simplified_perimeter, 1e-6)) - 1.0
++    # A smooth oval has nearly constant normalized radius around its center.
++    # Boxes can have a similarly long, wobbly pen path, but their normalized
++    # radius varies markedly between side midpoints and corners. Tighten the
++    # radial-fit tolerance so an imperfect square cannot become a circle.
+     looks_like_oval = (len(ring) >= 8 and len(simplified) >= 4
+-                       and radial_error <= 0.18 and curve_excess >= 0.025)
++                       and radial_error <= 0.09 and curve_excess >= 0.025)
+     if looks_like_oval:
+         diameter = (width+height)/2.0
+         return {"kind": "circle", "rect": fitz.Rect(cx-diameter/2, cy-diameter/2,

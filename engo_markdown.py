@@ -703,22 +703,25 @@ def _render_markdown_html(markdown_text: str, font_pt: float = 12.5, resources=N
 
     return f"""<!doctype html><html><head><meta charset='utf-8'><style>
       body {{ font-family: 'Segoe UI', Arial, sans-serif; font-size: {float(font_pt):.1f}pt; line-height: 1.48; }}
-      p {{ margin: 0.28em 0 0.72em 0; }} h1,h2,h3,h4 {{ margin: 0.9em 0 0.4em 0; line-height: 1.25; }}
-      ul,ol {{ margin-top: 0.25em; margin-bottom: 0.7em; }} li {{ margin: 0.16em 0; }}
-      table {{ border-collapse: collapse; margin: 0.65em 0; }} th,td {{ border: 1px solid {table_border}; padding: 5px 8px; }}
+      p {{ margin: 0.28em 0 0.72em 0; overflow-wrap: anywhere; }} h1,h2,h3,h4 {{ margin: 0.9em 0 0.4em 0; line-height: 1.25; overflow-wrap:anywhere; }}
+      ul,ol {{ margin-top: 0.25em; margin-bottom: 0.7em; padding-left: 1.55em; }}
+      li {{ margin: 0.16em 0; white-space: normal; overflow-wrap: anywhere; word-wrap: break-word; word-break: normal; }}
+      li p {{ display: inline; white-space: normal; overflow-wrap: anywhere; word-wrap: break-word; }}
+      table {{ border-collapse: collapse; margin: 0.65em 0; max-width: 100%; }}
+      th,td {{ border: 1px solid {table_border}; padding: 5px 8px; white-space: normal; overflow-wrap: anywhere; word-wrap: break-word; }}
       th {{ background: {table_header_bg}; color: {table_header_fg}; font-weight: bold; }}
-      pre {{ white-space: pre-wrap; background: {code_block_bg}; padding: 8px; border-radius: 6px; }}
-      code {{ background: {inline_code_bg}; color: {inline_code_fg}; border: 1px solid {inline_code_border}; padding: 1px 4px; border-radius: 4px; }}
+      pre {{ white-space: pre-wrap; overflow-wrap:anywhere; word-break:break-word; background: {code_block_bg}; padding: 8px; border-radius: 6px; }}
+      code {{ white-space:normal; overflow-wrap:anywhere; word-break:break-word; background: {inline_code_bg}; color: {inline_code_fg}; border: 1px solid {inline_code_border}; padding: 1px 4px; border-radius: 4px; }}
       blockquote {{ border-left: 3px solid #7297d8; margin-left: 0; padding-left: 10px; }}
       a {{ color: {link_fg}; }} hr {{ border: 0; border-top: 1px solid #78869a; }}
       sup, sub {{ font-size: 75%; line-height: 0; }}
-      .engo-math-inline {{ direction: ltr; unicode-bidi: embed; white-space: nowrap; font-family: 'Cambria Math','Times New Roman',serif; font-size: 1.04em; }}
-      .engo-math-display {{ direction: ltr; unicode-bidi: embed; text-align: center; margin: 0.85em 0; padding: 0.35em 0.2em; font-family: 'Cambria Math','Times New Roman',serif; font-size: 1.12em; white-space: normal; }}
+      .engo-math-inline {{ direction: ltr; unicode-bidi: embed; white-space: normal; overflow-wrap:anywhere; word-break:break-word; font-family: 'Cambria Math','Times New Roman',serif; font-size: 1.04em; }}
+      .engo-math-display {{ direction: ltr; unicode-bidi: embed; text-align: center; margin: 0.85em 0; padding: 0.35em 0.2em; font-family: 'Cambria Math','Times New Roman',serif; font-size: 1.12em; white-space: normal; overflow-wrap:anywhere; word-break:break-word; }}
       .engo-math-body {{ direction: ltr; }}
       .engo-math-frac {{ display: inline-block; vertical-align: middle; text-align: center; line-height: 1.08; margin: 0 2px; }}
       .engo-math-frac-num {{ display: block; border-bottom: 1px solid currentColor; padding: 0 3px 2px; }}
       .engo-math-frac-den {{ display: block; padding: 2px 3px 0; }}
-      .engo-math-binomial {{ white-space: nowrap; }}
+      .engo-math-binomial {{ white-space: normal; overflow-wrap:anywhere; }}
       .engo-math-operator {{ font-style: normal; }} .engo-math-bold {{ font-weight: bold; }}
       .engo-math-text {{ font-style: normal; }} .engo-math-variant {{ font-style: italic; }}
       .engo-math-accent {{ text-decoration: overline; }} .engo-math-boxed {{ border: 1px solid currentColor; padding: 1px 4px; }}

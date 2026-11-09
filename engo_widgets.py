@@ -2054,8 +2054,12 @@ def _recognize_pen_shape(points):
     ) if len(simplified) >= 3 else 0.0
     closed_path_length = path_len + endpoint
     curve_excess = (closed_path_length / max(simplified_perimeter, 1e-6)) - 1.0
+    # A smooth oval has nearly constant normalized radius around its center.
+    # Boxes can have a similarly long, wobbly pen path, but their normalized
+    # radius varies markedly between side midpoints and corners. Tighten the
+    # radial-fit tolerance so an imperfect square cannot become a circle.
     looks_like_oval = (len(ring) >= 8 and len(simplified) >= 4
-                       and radial_error <= 0.18 and curve_excess >= 0.025)
+                       and radial_error <= 0.09 and curve_excess >= 0.025)
     if looks_like_oval:
         diameter = (width+height)/2.0
         return {"kind": "circle", "rect": fitz.Rect(cx-diameter/2, cy-diameter/2,

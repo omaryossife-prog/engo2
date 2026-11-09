@@ -723,6 +723,8 @@ class AIChatStore:
             self.connection.execute("ALTER TABLE messages ADD COLUMN selected_text_context TEXT NOT NULL DEFAULT ''")
         if "selected_text_source_role" not in message_columns:
             self.connection.execute("ALTER TABLE messages ADD COLUMN selected_text_source_role TEXT NOT NULL DEFAULT 'assistant'")
+        if "selected_text_location_json" not in message_columns:
+            self.connection.execute("ALTER TABLE messages ADD COLUMN selected_text_location_json TEXT NOT NULL DEFAULT ''")
         chat_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(chats)").fetchall()}
         if "conversation_number" not in chat_columns:
             self.connection.execute("ALTER TABLE chats ADD COLUMN conversation_number INTEGER NOT NULL DEFAULT 0")
@@ -813,7 +815,8 @@ class AIChatStore:
     def load_messages(self, chat_id: int):
         rows = self.connection.execute(
             "SELECT role, content, created_at, attachment_path, page_index, attachments_json, "
-            "selected_text_context, selected_text_source_role FROM messages WHERE chat_id=? ORDER BY id",
+            "selected_text_context, selected_text_source_role, selected_text_location_json "
+            "FROM messages WHERE chat_id=? ORDER BY id",
             (int(chat_id),)
         ).fetchall()
         result = []
@@ -833,13 +836,19 @@ class AIChatStore:
                 }
                 for a in attachments if isinstance(a, dict) and a.get("path")
             ]
+            try:
+                location = json.loads(item.get("selected_text_location_json") or "")
+                item["selected_text_location"] = location if isinstance(location, dict) else None
+            except Exception:
+                item["selected_text_location"] = None
             result.append(item)
         return result
 
     def add_message(self, chat_id: int, role: str, content: str,
                     attachment_image: bytes | None = None, page_index: int | None = None,
                     attachment_images: list[dict] | None = None,
-                    selected_text_context: str = "", selected_text_source_role: str = "assistant"):
+                    selected_text_context: str = "", selected_text_source_role: str = "assistant",
+                    selected_text_location: dict | None = None):
         content = str(content)
         source_images = list(attachment_images or [])
         if attachment_image:
@@ -866,10 +875,12 @@ class AIChatStore:
         first_page = stored_attachments[0].get("page_index") if stored_attachments else page_index
         self.connection.execute(
             "INSERT INTO messages(chat_id, role, content, attachment_path, page_index, attachments_json, "
-            "selected_text_context, selected_text_source_role) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+            "selected_text_context, selected_text_source_role, selected_text_location_json) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (int(chat_id), str(role), content, first_path, first_page,
              json.dumps(stored_attachments, ensure_ascii=False),
-             str(selected_text_context or ""), str(selected_text_source_role or "assistant"))
+             str(selected_text_context or ""), str(selected_text_source_role or "assistant"),
+             json.dumps(selected_text_location, ensure_ascii=False) if isinstance(selected_text_location, dict) else "")
         )
         self.connection.execute("UPDATE chats SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (int(chat_id),))
         self.connection.commit()
@@ -1107,6 +1118,18 @@ class ProviderModelsWorker(QThread):
             self.failed.emit(self.provider, str(exc))
 
 
+class _AINoWheelComboBox(QComboBox):
+    """Prevent accidental setting changes while the AI settings page scrolls.
+
+    The mouse wheel must scroll the containing QScrollArea, not cycle through
+    provider/model/language choices merely because the pointer rests over a
+    dropdown. Clicking to open the list and deliberate keyboard navigation
+    continue to work normally, matching AppSettingsDialog behavior.
+    """
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class AISettingsDialog(QDialog):
     """Configure API keys and overridable model IDs for supported providers."""
     def __init__(self, settings: QSettings, parent=None):
@@ -1223,7 +1246,7 @@ class AISettingsDialog(QDialog):
         live_layout.addWidget(live_label)
         live_row = QHBoxLayout()
         live_row.addWidget(QLabel("Live model"))
-        live_combo = QComboBox()
+        live_combo = _AINoWheelComboBox()
         live_combo.setEditable(True)
         live_combo.setMinimumWidth(360)
         live_combo.setToolTip("Model ID for native, bidirectional Gemini Live voice sessions")
@@ -1257,7 +1280,7 @@ class AISettingsDialog(QDialog):
         language_layout.addWidget(language_title)
         language_row = QHBoxLayout()
         language_row.addWidget(QLabel("From"))
-        source_combo = QComboBox()
+        source_combo = _AINoWheelComboBox()
         source_combo.setObjectName("aiLanguageSelector")
         for label, code in [("Auto detect", "auto"), ("Arabic", "ar"), ("English", "en"), ("Russian", "ru"),
                             ("French", "fr"), ("German", "de"), ("Spanish", "es"), ("Turkish", "tr"),
@@ -1267,7 +1290,7 @@ class AISettingsDialog(QDialog):
         source_combo.setCurrentIndex(max(0, source_combo.findData(saved_source)))
         language_row.addWidget(source_combo, 1)
         language_row.addWidget(QLabel("To"))
-        target_combo = QComboBox()
+        target_combo = _AINoWheelComboBox()
         target_combo.setObjectName("aiLanguageSelector")
         for label, code in [("Arabic", "ar"), ("English", "en"), ("Russian", "ru"), ("French", "fr"),
                             ("German", "de"), ("Spanish", "es"), ("Turkish", "tr"),
@@ -1285,7 +1308,7 @@ class AISettingsDialog(QDialog):
         language_layout.addWidget(handwriting_note)
         voice_row = QHBoxLayout()
         voice_row.addWidget(QLabel("Voice input language"))
-        voice_combo = QComboBox()
+        voice_combo = _AINoWheelComboBox()
         voice_combo.setObjectName("aiLanguageSelector")
         for label, code in [("Arabic (Egypt)", "ar-EG"), ("English (US)", "en-US"), ("Russian", "ru-RU"), ("French", "fr-FR")]:
             voice_combo.addItem(label, code)
@@ -1835,7 +1858,18 @@ class AIRequestWorker(QThread):
             context = ""
             images: list[dict[str, object]] = []
             sampled_images = []
-            if self.mode in ("page", "teach") and not program_help:
+            has_user_selected_regions = any(
+                isinstance(item, dict) and bool(item.get("data")) for item in self.selected_images
+            )
+            # Native PDF text selected from the document is sent inside explicit
+            # delimiters by the chat panel. Treat it as a scoped user selection too,
+            # even though it does not require an image attachment.
+            has_manual_selected_text = (
+                "<<<BEGIN SELECTED CHAT PASSAGE>>>" in str(self.question or "")
+                and "<<<END SELECTED CHAT PASSAGE>>>" in str(self.question or "")
+            )
+            has_selected_scope = has_user_selected_regions or has_manual_selected_text
+            if self.mode in ("page", "teach") and not program_help and not has_selected_scope:
                 # Page-specific actions always include the current page, even if the user
                 # disabled whole-document context in the chat options.
                 context, sampled_images = self._read_page_context(self.path, self.current_page_index)
@@ -1851,14 +1885,14 @@ class AIRequestWorker(QThread):
                     if not any(current_page_label in str(item.get("label", "")) for item in images):
                         _page_note, visible_page_images = self._read_page_context(self.path, self.current_page_index)
                         images.extend(visible_page_images)
-            elif self.supplemental_documents and not program_help:
+            elif self.supplemental_documents and not program_help and not has_selected_scope:
                 # A linked pair is an explicit request to discuss the currently visible pages.
                 # Keep both images available even when whole-document context is switched off.
                 context, visible_page_images = self._read_page_context(self.path, self.current_page_index)
                 images.extend(visible_page_images)
             # A linked companion PDF contributes its currently displayed page to the same
             # request. The primary file remains the owner of the saved conversation.
-            if not program_help and (self.include_context or self.mode in ("page", "teach") or self.supplemental_documents):
+            if not program_help and (self.include_context or (self.mode in ("page", "teach") and not has_selected_scope) or (self.supplemental_documents and not has_selected_scope)):
                 for supplement in self.supplemental_documents[:2]:
                     self._check_cancelled()
                     companion_path = os.path.abspath(str(supplement.get("path") or ""))
@@ -1889,7 +1923,7 @@ class AIRequestWorker(QThread):
                         companion_image["label"] = f"CURRENT LINKED PAGE · {companion_name} · {companion_image.get('label', 'page image')}"
                         images.append(companion_image)
             translation_only = "literal translation engine" in str(self.system_prompt or "").casefold()
-            if not program_help and not translation_only and not is_office_document(self.path) and "USER-DEFINED REGION TAGS" not in context:
+            if not program_help and not has_selected_scope and not translation_only and not is_office_document(self.path) and "USER-DEFINED REGION TAGS" not in context:
                 try:
                     tag_doc = self._open_pdf(self.path)
                     try:
@@ -1913,13 +1947,39 @@ class AIRequestWorker(QThread):
                 user_content += "\n\n--- PDF CONTENT CONTEXT (extracted locally from this file) ---\n" + context + "\n--- END PDF CONTENT CONTEXT ---"
             if images:
                 labels = ", ".join(str(item["label"]) for item in images)
-                user_content += (
-                    f"\n\nAttached page images and selected regions: {labels}. "
-                    "Treat user-selected crops as focused visual references only, NOT as a scope restriction. "
-                    "When PDF context is enabled, use the full extracted text of the primary PDF and every linked companion PDF too. "
-                    "The question may require connecting a problem in one file/page to an answer, formula, diagram, or explanation in another. "
-                    "Identify which file and page each piece of evidence comes from, compare them, and do not assume the selected crop is the only relevant material."
-                )
+                if has_user_selected_regions:
+                    if self.include_context:
+                        user_content += (
+                            f"\n\nAttached page images and user-selected region(s): {labels}. "
+                            "SCOPE PRIORITY (80/20): The user manually selected a specific region. Make that region the primary subject of the answer and devote roughly 80% of the analysis and response to what is visible/readable in that region. Use the remaining PDF context (about 20%) only to clarify a symbol, definition, nearby step, reference, or essential dependency. Do not drift into unrelated sections or provide a whole-document answer unless explicitly asked. Identify when a contextual fact comes from outside the selected region."
+                        )
+                    else:
+                        user_content += (
+                            f"\n\nAttached user-selected region(s): {labels}. "
+                            "STRICT SCOPE (100%): Answer using ONLY the manually selected region(s) and the user's question. Do not use, infer from, or summarize unrelated pages, the rest of the PDF, linked documents, or tagged regions. If the selected crop is unclear or insufficient, say exactly what cannot be read or what extra context is needed instead of guessing from the rest of the file."
+                        )
+                else:
+                    user_content += (
+                        f"\n\nAttached page images and selected regions: {labels}. "
+                        "When PDF context is enabled, use the full extracted text of the primary PDF and every linked companion PDF when needed. "
+                        "Identify which file and page each piece of evidence comes from and compare them only when the question requires it."
+                    )
+            if has_manual_selected_text:
+                if self.include_context:
+                    user_content += (
+                        "\n\nSELECTED NATIVE PDF TEXT PRIORITY (80/20): The passage between "
+                        "<<<BEGIN SELECTED CHAT PASSAGE>>> and <<<END SELECTED CHAT PASSAGE>>> "
+                        "is the exact text the user selected in the PDF. Make it the primary subject and devote roughly 80% "
+                        "of the analysis and answer to that passage. Use the remaining PDF context only to clarify directly "
+                        "relevant symbols, definitions, nearby steps, or dependencies. Do not drift into unrelated sections."
+                    )
+                else:
+                    user_content += (
+                        "\n\nSTRICT SELECTED-PASSAGE SCOPE (100%): The passage between "
+                        "<<<BEGIN SELECTED CHAT PASSAGE>>> and <<<END SELECTED CHAT PASSAGE>>> "
+                        "is the only document content you may use for this answer. Do not rely on other pages, the rest of the PDF, "
+                        "linked files, or region tags. If it is insufficient, explain what is missing rather than guessing."
+                    )
             if "USER-DEFINED REGION TAGS" in context:
                 user_content += (
                     "\n\nTAG-SCOPED REQUEST RULE: When the user's question names one of the region tags, "
@@ -1928,7 +1988,7 @@ class AIRequestWorker(QThread):
                     "This tag-scope rule overrides the general full-document and crop-reference guidance above, "
                     "unless the user explicitly asks for comparisons or broader context."
                 )
-            if not program_help and not is_office_document(self.path) and not self.include_context and not images:
+            if not program_help and not is_office_document(self.path) and not self.include_context and not images and not has_manual_selected_text:
                 user_content += "\n\nNo PDF text or page image was supplied for this request. If the question refers to the file, ask for context rather than guessing."
             elif not program_help and is_office_document(self.path):
                 user_content += "\n\nSOURCE FORMAT: The selected passage above comes from a native Word or PowerPoint document. The original Office text was not converted to PDF. Answer using the selected Office passage; do not assume PDF pages or images were provided."

@@ -12,7 +12,7 @@ import html as html_module
 from pathlib import Path
 from PIL import Image, ImageOps, ImageChops, ImageFilter
 from PyQt6.QtCore import QObject, Qt, QSize, QSizeF, QRect, QRectF, QPoint, QPointF, QEvent, QTimer, QPropertyAnimation, QParallelAnimationGroup, QVariantAnimation, QEasingCurve, QSettings, QUrl, QThread, QRunnable, QThreadPool, QMarginsF, QStandardPaths, QDir, pyqtSignal, QBuffer, QByteArray, QIODevice, QMimeData, QSignalBlocker
-from PyQt6.QtGui import QColor, QPalette, QImage, QPixmap, QIcon, QFileSystemModel, QPainter, QPen, QBrush, QKeySequence, QShortcut, QAction, QCursor, QPolygonF, QPainterPath, QPainterPathStroker, QDesktopServices, QPdfWriter, QPageSize, QTextDocument, QTextCursor, QFont, QDrag, QContextMenuEvent, QMouseEvent
+from PyQt6.QtGui import QColor, QPalette, QImage, QPixmap, QIcon, QFileSystemModel, QPainter, QPen, QBrush, QKeySequence, QShortcut, QAction, QCursor, QPolygonF, QPainterPath, QPainterPathStroker, QDesktopServices, QPdfWriter, QPageSize, QTextDocument, QTextCursor, QTextOption, QFont, QDrag, QContextMenuEvent, QMouseEvent
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QLabel, QPushButton, QToolButton, QBoxLayout,
     QCheckBox, QColorDialog, QFileDialog, QHBoxLayout, QVBoxLayout, QScrollArea, QAbstractScrollArea,
@@ -24,7 +24,6 @@ from PyQt6.QtWidgets import (
 
 from engo_ai_core import (
     AIChatStore,
-    AISettingsDialog,
     AI_DEFAULT_MODELS,
     AI_PROVIDER_LABELS,
 )
@@ -215,6 +214,18 @@ class ClickableChatImageLabel(QLabel):
         super().mousePressEvent(event)
 
 
+class ClickableChatPassageLabel(QLabel):
+    """Saved PDF excerpt that can be clicked to return to its source location."""
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class ChatImagePreviewDialog(QDialog):
     """Resizable, zoomable popup for images attached to chat messages."""
 
@@ -327,13 +338,16 @@ class ChatImagePreviewDialog(QDialog):
 class AIMessageBubble(QFrame):
     """Responsive chat bubble with markdown/table rendering and visual region attachments."""
     selectionQuestionRequested = pyqtSignal(str, str)
+    selectedTextLocationActivated = pyqtSignal(str, int, object)
 
-    def __init__(self, role: str, content: str, width: int = 520, created_at: str = "", attachments=None, parent=None, font_pt: float = 13.0):
+    def __init__(self, role: str, content: str, width: int = 520, created_at: str = "", attachments=None, parent=None, font_pt: float = 13.0, selected_text_context: str = "", selected_text_location=None, language: str = "en"):
         super().__init__(parent)
         self.role = role
         self._font_pt = max(8.0, min(24.0, float(font_pt or 13.0)))
         self._content = str(content or "")
         self._attachments = list(attachments or [])
+        self._selected_text_context = str(selected_text_context or "").strip()
+        self._selected_text_location = dict(selected_text_location) if isinstance(selected_text_location, dict) else None
         is_user = role == "user"
         row = QHBoxLayout(self)
         row.setContentsMargins(1, 2, 1, 2)
@@ -408,6 +422,8 @@ class AIMessageBubble(QFrame):
         self.body.setFrameShape(QFrame.Shape.NoFrame)
         self.body.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.body.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.body.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.body.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         self.body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.LinksAccessibleByMouse)
         self.body.setStyleSheet("QTextBrowser { background: transparent; border: 0; }")
         chat_font = self.body.font()
@@ -437,6 +453,52 @@ class AIMessageBubble(QFrame):
         self.body.document().setDefaultStyleSheet(message_document_css)
         self.set_content(self._content)
         card_layout.addWidget(self.body)
+        if is_user and self._selected_text_context:
+            selected_card = QFrame(card)
+            selected_card.setObjectName("aiSelectedPassageCard")
+            selected_layout = QVBoxLayout(selected_card)
+            selected_layout.setContentsMargins(8, 6, 8, 6)
+            selected_layout.setSpacing(4)
+            selected_card.setToolTip(
+                "الضغط على المقطع يعيدك إلى مكانه في الملف" if str(language or "en").lower().startswith("ar")
+                else "Click the passage to return to its source in the PDF"
+            )
+            selected_title_row = QHBoxLayout()
+            is_ar_message = str(language or "en").lower().startswith("ar")
+            selected_title = QLabel(("النص المحدد من الملف" if self._selected_text_location else "النص المحدد") if is_ar_message else "Selected passage")
+            selected_title.setObjectName("aiSelectedPassageTitle")
+            selected_title_row.addWidget(selected_title, 1)
+            if self._selected_text_location and self._selected_text_location.get("path") and self._selected_text_location.get("page_index") is not None:
+                jump_btn = QToolButton(selected_card)
+                jump_btn.setObjectName("aiSelectedPassageJump")
+                jump_btn.setText("عرض في PDF" if is_ar_message else "Show in PDF")
+                jump_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                jump_btn.setToolTip("الانتقال إلى النص المحدد في الصفحة" if is_ar_message else "Jump to the selected text in the PDF")
+                jump_btn.clicked.connect(lambda _checked=False, loc=dict(self._selected_text_location): self.selectedTextLocationActivated.emit(str(loc.get("path") or ""), int(loc.get("page_index", 0)), loc.get("box")))
+                selected_title_row.addWidget(jump_btn, 0, Qt.AlignmentFlag.AlignRight)
+            selected_layout.addLayout(selected_title_row)
+            selected_preview = ClickableChatPassageLabel(self._selected_text_context)
+            selected_preview.setObjectName("aiSelectedPassagePreview")
+            selected_preview.setWordWrap(True)
+            selected_preview.setTextFormat(Qt.TextFormat.PlainText)
+            selected_preview.setToolTip(
+                ("اضغط للرجوع إلى موضع النص في PDF" if is_ar_message else "Click to return to this passage in the PDF")
+                if self._selected_text_location else self._selected_text_context
+            )
+            has_saved_location = bool(
+                self._selected_text_location
+                and self._selected_text_location.get("path")
+                and self._selected_text_location.get("page_index") is not None
+            )
+            if has_saved_location:
+                selected_preview.setCursor(Qt.CursorShape.PointingHandCursor)
+                selected_preview.clicked.connect(
+                    lambda loc=dict(self._selected_text_location): self.selectedTextLocationActivated.emit(
+                        str(loc.get("path") or ""), int(loc.get("page_index", 0)), loc.get("box")
+                    )
+                )
+            selected_layout.addWidget(selected_preview)
+            card_layout.addWidget(selected_card)
         if not is_user:
             footer_row = QHBoxLayout()
             footer_row.setContentsMargins(0, -1, 0, 0)
@@ -608,6 +670,7 @@ class AIChatPanel(QFrame):
         self.selected_regions: dict[str, list[dict]] = {}
         self._pending_selected_text = ""
         self._pending_selected_text_source_role = "assistant"
+        self._pending_selected_text_location = None
         self._live_bubble = None
         self._live_path = ""
         self._live_text = ""
@@ -674,6 +737,33 @@ class AIChatPanel(QFrame):
             self.pdf_actions_btn.setText("إجراءات PDF ▾" if is_ar else "PDF actions ▾")
         if hasattr(self, "export_btn"):
             self.export_btn.setText("تصدير" if is_ar else "Export")
+        if hasattr(self, "close_panel_btn"):
+            self.close_panel_btn.setToolTip("إغلاق قسم المحادثة" if is_ar else "Close AI chat")
+            self.close_panel_btn.setAccessibleName("إغلاق قسم محادثة AI" if is_ar else "Close AI chat panel")
+
+        # Saved passage cards are not rebuilt when the interface language changes;
+        # update their labels in place so the transcript itself remains untouched.
+        for bubble in self.findChildren(AIMessageBubble):
+            if bubble.role != "user" or not getattr(bubble, "_selected_text_context", ""):
+                continue
+            has_location = bool(
+                getattr(bubble, "_selected_text_location", None)
+                and bubble._selected_text_location.get("path")
+                and bubble._selected_text_location.get("page_index") is not None
+            )
+            title_label = bubble.findChild(QLabel, "aiSelectedPassageTitle")
+            if title_label is not None:
+                title_label.setText(("النص المحدد من الملف" if has_location else "النص المحدد") if is_ar else "Selected passage")
+            preview_label = bubble.findChild(QLabel, "aiSelectedPassagePreview")
+            if preview_label is not None:
+                preview_label.setToolTip(("اضغط للرجوع إلى موضع النص في الملف" if is_ar else "Click to return to this passage in the PDF") if has_location else bubble._selected_text_context)
+            jump_button = bubble.findChild(QToolButton, "aiSelectedPassageJump")
+            if jump_button is not None:
+                jump_button.setText("عرض في PDF" if is_ar else "Show in PDF")
+                jump_button.setToolTip("الانتقال إلى النص المحدد في الصفحة" if is_ar else "Jump to the selected text in the PDF")
+            passage_card = bubble.findChild(QFrame, "aiSelectedPassageCard")
+            if passage_card is not None and has_location:
+                passage_card.setToolTip("الضغط على المقطع يعيدك إلى مكانه في الملف" if is_ar else "Click the passage to return to its source in the PDF")
         if hasattr(self, "new_chat_btn"):
             self.new_chat_btn.setText("+ محادثة جديدة" if is_ar else "+ New chat")
             self.new_chat_btn.setToolTip(
@@ -839,16 +929,19 @@ class AIChatPanel(QFrame):
         self.focus_mode_btn.setAccessibleName("Enter chat focus mode")
         self.focus_mode_btn.clicked.connect(lambda _checked=False: self.main_window.toggle_chat_focus_mode())
         header.addWidget(self.focus_mode_btn)
-        self.settings_btn = QPushButton()
-        self.settings_btn.setObjectName("aiSettings")
-        self.settings_btn.setIcon(make_icon("settings", "#b7c6dc", 16))
-        self.settings_btn.setFixedSize(31, 29)
-        self.settings_btn.setToolTip("Configure provider API keys and exact model IDs")
-        self.settings_btn.clicked.connect(self._open_settings)
-        header.addWidget(self.settings_btn)
+        self.close_panel_btn = QPushButton("×")
+        self.close_panel_btn.setObjectName("aiClosePanel")
+        self.close_panel_btn.setFixedSize(36, 34)
+        self.close_panel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.close_panel_btn.setToolTip("Close AI chat")
+        self.close_panel_btn.setAccessibleName("Close AI chat panel")
+        self.close_panel_btn.clicked.connect(self.main_window.close_ai_panel)
+        header.addWidget(self.close_panel_btn)
         layout.addLayout(header)
 
-        chat_session_row = QHBoxLayout()
+        self.chat_session_container = QWidget(self)
+        chat_session_row = QHBoxLayout(self.chat_session_container)
+        chat_session_row.setContentsMargins(0, 0, 0, 0)
         chat_session_row.setSpacing(6)
         self.chat_combo = QComboBox()
         self.chat_combo.setObjectName("aiChatSelector")
@@ -872,7 +965,7 @@ class AIChatPanel(QFrame):
         self.new_chat_btn.setToolTip("Start a new saved conversation for this PDF")
         self.new_chat_btn.clicked.connect(self._new_conversation)
         chat_session_row.addWidget(self.new_chat_btn)
-        layout.addLayout(chat_session_row)
+        layout.addWidget(self.chat_session_container)
 
         self.chat_search_row = QWidget()
         search_row_layout = QHBoxLayout(self.chat_search_row)
@@ -1115,17 +1208,112 @@ class AIChatPanel(QFrame):
         self._refresh_attachment_label()
         self.set_document("", "No PDF open")
 
-    def _animate_bubble_in(self, bubble):
-        """Refresh a new bubble without a QGraphicsEffect.
+    def prepare_chat_content_transition(self):
+        """Keep the pane visually empty while its side-to-side motion runs."""
+        self.composer_frame.setMaximumHeight(16777215)
+        for bubble in getattr(self, "_chat_bubbles", []):
+            try:
+                bubble.setMaximumHeight(16777215)
+            except RuntimeError:
+                continue
+        for widget in (getattr(self, "transcript", None), getattr(self, "composer_frame", None)):
+            if widget is not None:
+                widget.hide()
 
-        The transcript contains QTextBrowser children. Applying opacity effects to
-        these compound widgets forces Qt to render nested widget trees into effect
-        pixmaps and can produce inactive/double-painter warnings during splitter
-        resizing. Native update() keeps insertion immediate and paint-safe.
-        """
+    def reveal_chat_content(self, stagger_messages: bool = True):
+        """Reveal the chat surface after the panel has reached its final width."""
+        # A close animation intentionally collapses maximumHeight. Always restore
+        # the natural limits before a later re-open/exit reveal to avoid a stuck
+        # one-pixel composer or messages after the full-screen transition.
+        try:
+            self.composer_frame.setMaximumHeight(16777215)
+        except (RuntimeError, AttributeError):
+            pass
+        for bubble in getattr(self, "_chat_bubbles", []):
+            try:
+                bubble.setMaximumHeight(16777215)
+            except (RuntimeError, AttributeError):
+                continue
+        for widget in (getattr(self, "transcript", None), getattr(self, "composer_frame", None)):
+            if widget is not None:
+                widget.show()
+        self.updateGeometry()
+        if stagger_messages:
+            QTimer.singleShot(35, self._stagger_existing_messages)
+        QTimer.singleShot(65, self._reflow_after_show)
+
+    def _stagger_existing_messages(self):
+        if not self.isVisible() or not self.transcript.isVisible():
+            return
+        # A short, cascading height reveal gives the conversation a clear arrival
+        # after the pane slides in, without graphics effects on QTextBrowser trees.
+        bubbles = list(getattr(self, "_chat_bubbles", [])[-14:])
+        for index, bubble in enumerate(bubbles):
+            try:
+                target_height = max(42, int(bubble.sizeHint().height()))
+                bubble.setMaximumHeight(1)
+                animation = QPropertyAnimation(bubble, b"maximumHeight", bubble)
+                animation.setDuration(118)
+                animation.setStartValue(1)
+                animation.setEndValue(target_height)
+                animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+                animation.finished.connect(lambda b=bubble: b.setMaximumHeight(16777215))
+                QTimer.singleShot(index * 17, animation.start)
+            except (RuntimeError, AttributeError):
+                continue
+
+    def hide_chat_content_for_transition(self):
+        """Collapse the content before the pane/focus surface moves away."""
+        for widget in (getattr(self, "transcript", None), getattr(self, "composer_frame", None)):
+            if widget is not None:
+                widget.hide()
+
+    def animate_chat_content_close(self):
+        """Cascade message collapse as the dock begins sliding closed."""
+        bubbles = list(getattr(self, "_chat_bubbles", [])[-14:])
+        for index, bubble in enumerate(reversed(bubbles)):
+            try:
+                start_height = max(1, int(bubble.height() or bubble.sizeHint().height()))
+                animation = QPropertyAnimation(bubble, b"maximumHeight", bubble)
+                animation.setDuration(104)
+                animation.setStartValue(start_height)
+                animation.setEndValue(1)
+                animation.setEasingCurve(QEasingCurve.Type.InCubic)
+                self._closing_bubble_animations = getattr(self, "_closing_bubble_animations", [])
+                self._closing_bubble_animations.append(animation)
+                QTimer.singleShot(index * 8, animation.start)
+            except (RuntimeError, AttributeError):
+                continue
+        composer = self.composer_frame
+        try:
+            composer_start = max(1, int(composer.height() or composer.sizeHint().height()))
+            composer_animation = QPropertyAnimation(composer, b"maximumHeight", composer)
+            composer_animation.setDuration(112)
+            composer_animation.setStartValue(composer_start)
+            composer_animation.setEndValue(1)
+            composer_animation.setEasingCurve(QEasingCurve.Type.InCubic)
+            self._closing_composer_animation = composer_animation
+            composer_animation.start()
+        except (RuntimeError, AttributeError):
+            composer.hide()
+
+    def _animate_bubble_in(self, bubble):
+        """Use a light height reveal instead of rasterizing nested text widgets."""
         if bubble is not None:
             try:
-                bubble.update()
+                if self.transcript.isVisible() and self.isVisible():
+                    target_height = max(42, int(bubble.sizeHint().height()))
+                    bubble.setMaximumHeight(1)
+                    animation = QPropertyAnimation(bubble, b"maximumHeight", bubble)
+                    animation.setDuration(155)
+                    animation.setStartValue(1)
+                    animation.setEndValue(target_height)
+                    animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+                    animation.finished.connect(lambda b=bubble: b.setMaximumHeight(16777215))
+                    self._last_bubble_animation = animation
+                    animation.start()
+                else:
+                    bubble.update()
             except RuntimeError:
                 pass
 
@@ -1688,16 +1876,6 @@ class AIChatPanel(QFrame):
         provider = str(self.provider_combo.currentData() or "deepseek")
         self._store_chat_model(provider, str(model_text or "").strip())
 
-    def _open_settings(self):
-        settings = getattr(self.main_window, "settings", None) or self.settings
-        try:
-            settings.sync()
-        except Exception:
-            pass
-        dlg = AISettingsDialog(settings, self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            self._provider_changed(self.provider_combo.currentIndex())
-            self.main_window.show_status("تم حفظ إعدادات مزود AI" if str(self.settings.value("interface_language", "en", type=str) or "en").lower().startswith("ar") else "AI provider settings saved")
 
     def _scope_key_for_path(self, path: str | None = None) -> str:
         target = os.path.abspath(path or self.document_path) if (path or self.document_path) else ""
@@ -2147,6 +2325,7 @@ class AIChatPanel(QFrame):
     def _clear_pending_selected_text(self):
         self._pending_selected_text = ""
         self._pending_selected_text_source_role = "assistant"
+        self._pending_selected_text_location = None
         if hasattr(self, "pending_selected_text_frame"):
             self.pending_selected_text_frame.hide()
         if hasattr(self, "prompt_edit"):
@@ -2160,12 +2339,13 @@ class AIChatPanel(QFrame):
             has_regions = bool(self.selected_regions.get(self.document_path)) if self.document_path else False
             self.clear_attachment_btn.setEnabled(has_regions and not self._busy)
 
-    def _set_pending_selected_text(self, selected_text: str, source_role: str = "assistant"):
+    def _set_pending_selected_text(self, selected_text: str, source_role: str = "assistant", location=None):
         text = str(selected_text or "").replace("\u2029", "\n").replace("\u2028", "\n").strip()
         if not text:
             return
         self._pending_selected_text = text
         self._pending_selected_text_source_role = str(source_role or "assistant")
+        self._pending_selected_text_location = dict(location) if isinstance(location, dict) else None
         role = self._pending_selected_text_source_role.casefold()
         source_label = ("your message" if role == "user" else
                         (("the Office document" if is_office_document(self.document_path) else "the PDF document")
@@ -2266,11 +2446,13 @@ class AIChatPanel(QFrame):
             return
         selected_context = self._pending_selected_text
         selected_source_role = self._pending_selected_text_source_role
+        selected_location = dict(self._pending_selected_text_location) if isinstance(self._pending_selected_text_location, dict) else None
         self.prompt_edit.clear()
         self._clear_pending_selected_text()
         self._submit(
             text, "custom", selected_text_context=selected_context,
-            selected_text_source_role=selected_source_role
+            selected_text_source_role=selected_source_role,
+            selected_text_location=selected_location
         )
 
     def send_quick(self, prompt: str, mode: str):
@@ -2283,7 +2465,7 @@ class AIChatPanel(QFrame):
         self._submit(prompt, mode)
 
     def _submit(self, prompt: str, mode: str, selected_text_context: str = "",
-                selected_text_source_role: str = "assistant"):
+                selected_text_source_role: str = "assistant", selected_text_location=None):
         regions = list(self.selected_regions.get(self.document_path, []))
         # Keep the visible user message concise and render selected chat text as a
         # separate quoted attachment. The exact passage is persisted as metadata and
@@ -2315,7 +2497,8 @@ class AIChatPanel(QFrame):
             attachment_images=stored_images if stored_images else None,
             page_index=regions[0].get("page_index") if regions else None,
             selected_text_context=selected_text_context,
-            selected_text_source_role=selected_text_source_role
+            selected_text_source_role=selected_text_source_role,
+            selected_text_location=selected_text_location
         )
         # Attached regions become part of saved chat history. Clear the pending tray after sending;
         # follow-up questions can refer to those images from the recent conversation history.
@@ -2332,7 +2515,8 @@ class AIChatPanel(QFrame):
     def append_message_for(self, path: str, role: str, text: str,
                            attachment_image: bytes | None = None, page_index: int | None = None,
                            attachment_images: list[dict] | None = None,
-                           selected_text_context: str = "", selected_text_source_role: str = "assistant"):
+                           selected_text_context: str = "", selected_text_source_role: str = "assistant",
+                           selected_text_location=None):
         if not path:
             return
         path = os.path.abspath(path)
@@ -2354,7 +2538,8 @@ class AIChatPanel(QFrame):
             chat_id, role, str(text), attachment_image=attachment_image,
             page_index=page_index, attachment_images=attachment_images,
             selected_text_context=selected_text_context,
-            selected_text_source_role=selected_text_source_role
+            selected_text_source_role=selected_text_source_role,
+            selected_text_location=selected_text_location
         )
         self.messages_by_document[scope_key] = self.chat_store.load_messages(chat_id)
         self._loaded_chat_ids_by_scope[scope_key] = int(chat_id)
@@ -2592,8 +2777,9 @@ class AIChatPanel(QFrame):
         """Route a selected transcript passage back into this conversation."""
         if bubble is not None:
             bubble.selectionQuestionRequested.connect(self._ask_about_selected_chat_text)
+            bubble.selectedTextLocationActivated.connect(self.main_window.jump_to_pdf_selection)
 
-    def _ask_about_selected_chat_text(self, selected_text: str, source_role: str = "assistant"):
+    def _ask_about_selected_chat_text(self, selected_text: str, source_role: str = "assistant", location=None):
         """Attach a selected passage to the composer so the user can write a custom question."""
         selected_text = str(selected_text or "").replace("\u2029", "\n").replace("\u2028", "\n").strip()
         if not selected_text or not self.document_path:
@@ -2605,7 +2791,7 @@ class AIChatPanel(QFrame):
                 "انتظر حتى تنتهي الإجابة الحالية، ثم حدّد المقطع مرة أخرى." if is_ar else "Wait for the current answer to finish, then select the passage again."
             )
             return
-        self._set_pending_selected_text(selected_text, source_role)
+        self._set_pending_selected_text(selected_text, source_role, location)
         self.main_window.show_status("تم إرفاق المقطع المحدد من المحادثة · اكتب سؤالك" if is_ar else "Selected chat passage attached · type your question and press Send")
 
     def _render_transcript(self):
@@ -2617,6 +2803,7 @@ class AIChatPanel(QFrame):
         self._chat_search_matches = []
         self._chat_search_current = -1
         history = self.messages_by_document.get(self.chat_scope_key or self.document_path, [])
+        interface_language = str(self.settings.value("interface_language", "en", type=str) or "en")
         while self.transcript_layout.count():
             item = self.transcript_layout.takeAt(0)
             widget = item.widget()
@@ -2662,7 +2849,10 @@ class AIChatPanel(QFrame):
                 message_width = user_bubble_width if role == "user" else assistant_bubble_width
                 bubble = AIMessageBubble(
                     role, item.get("content", ""), message_width,
-                    item.get("created_at", ""), attachments=attachments, font_pt=self._chat_font_pt
+                    item.get("created_at", ""), attachments=attachments, font_pt=self._chat_font_pt,
+                    selected_text_context=item.get("selected_text_context", ""),
+                    selected_text_location=item.get("selected_text_location"),
+                    language=interface_language
                 )
                 self._connect_message_bubble_actions(bubble)
                 self._chat_bubbles.append(bubble)
@@ -2728,7 +2918,7 @@ class AIChatPanel(QFrame):
         self._update_send_button_state()
         self.prompt_edit.setEnabled(bool(self.document_path) and not busy)
         self.provider_combo.setEnabled(not busy)
-        self.settings_btn.setEnabled(not busy)
+        self.close_panel_btn.setEnabled(True)
         self.export_btn.setEnabled(bool(self.document_path) and not busy)
         office_source = is_office_document(self.document_path)
         self.pdf_actions_btn.setEnabled(bool(self.document_path) and not busy and not office_source)

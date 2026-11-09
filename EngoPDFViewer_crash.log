@@ -45,3 +45,106 @@ Current thread 0x0000445c (most recent call first):
 
 
 --- Engo session started 2026-11-07 09:49:49 ---
+
+
+--- Engo session started 2026-11-08 17:04:46 ---
+
+--- Unhandled Python exception ---
+Traceback (most recent call last):
+  File "D:\ENGO1\1\engo_app_dialogs.py", line 188, in paintEvent
+    source_index = self.owner.tabs.indexOf(self._pressed_tab) if self._pressed_tab is not None else -1
+                   ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+RuntimeError: wrapped C/C++ object of type DocumentTab has been deleted
+
+--- Unhandled Python exception ---
+Traceback (most recent call last):
+  File "D:\ENGO1\1\engo_app_dialogs.py", line 188, in paintEvent
+    source_index = self.owner.tabs.indexOf(self._pressed_tab) if self._pressed_tab is not None else -1
+                   ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+RuntimeError: wrapped C/C++ object of type DocumentTab has been deleted
+
+--- Unhandled Python exception ---
+Traceback (most recent call last):
+  File "D:\ENGO1\1\engo_app_dialogs.py", line 188, in paintEvent
+    source_index = self.owner.tabs.indexOf(self._pressed_tab) if self._pressed_tab is not None else -1
+                   ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+RuntimeError: wrapped C/C++ object of type DocumentTab has been deleted
+
+--- Unhandled Python exception ---
+Traceback (most recent call last):
+  File "D:\ENGO1\1\engo_app_dialogs.py", line 188, in paintEvent
+    source_index = self.owner.tabs.indexOf(self._pressed_tab) if self._pressed_tab is not None else -1
+                   ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+RuntimeError: wrapped C/C++ object of type DocumentTab has been deleted
+
+--- Unhandled Python exception ---
+Traceback (most recent call last):
+  File "D:\ENGO1\1\engo_app_dialogs.py", line 188, in paintEvent
+    source_index = self.owner.tabs.indexOf(self._pressed_tab) if self._pressed_tab is not None else -1
+                   ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+RuntimeError: wrapped C/C++ object of type DocumentTab has been deleted
+
+
+--- Engo session started 2026-11-09 00:45:16 ---
+
+--- Unhandled Python exception ---
+Traceback (most recent call last):
+  File "D:\ENGO1\1\engo_app_dialogs.py", line 188, in paintEvent
+    source_index = self.owner.tabs.indexOf(self._pressed_tab) if self._pressed_tab is not None else -1
+                   ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+RuntimeError: wrapped C/C++ object of type DocumentTab has been deleted
+
+
+--- Engo session started 2026-11-09 15:33:55 ---
+
+
+--- Engo session started 2026-11-09 16:17:07 ---
+Windows fatal exception: access violation
+
+Current thread 0x00004288 (most recent call first):
+  <no Python frame>
+
+
+--- Engo session started 2026-11-09 16:17:49 ---
+
+
+--- Engo session started 2026-11-09 16:44:10 ---
+Windows fatal exception: access violation
+
+Current thread 0x000044c0 (most recent call first):
+  <no Python frame>
+
+
+--- Engo session started 2026-11-09 16:44:45 ---
+
+
+--- Engo session started 2026-11-09 16:45:01 ---
+
+
+--- Engo session started 2026-11-09 16:59:51 ---
+Windows fatal exception: access violation
+
+Current thread 0x00004528 (most recent call first):
+  <no Python frame>
+
+
+--- Engo session started 2026-11-09 17:00:10 ---
+
+
+--- Engo session started 2026-11-09 18:23:09 ---
+Windows fatal exception: access violation
+
+Current thread 0x00005308 (most recent call first):
+  <no Python frame>
+
+
+--- Engo session started 2026-11-09 18:36:37 ---
+
+
+--- Engo session started 2026-11-09 18:39:38 ---
+
+
+--- Engo session started 2026-11-09 18:39:51 ---
+
+
+--- Engo session started 2026-11-09 18:51:36 ---

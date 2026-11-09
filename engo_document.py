@@ -159,6 +159,10 @@ class DocumentCanvas(QWidget):
         self.ai_focus = None  # (page_index, normalized box [x,y,w,h], label, semantic kind)
         # Match the known-good 15.28.25 behavior: focus is visible unless the learner turns it off.
         self.ai_focus_visible = True
+        self._temporary_selection_highlight = None  # (page_index, box, started_monotonic)
+        self._temporary_selection_timer = QTimer(self)
+        self._temporary_selection_timer.setInterval(32)
+        self._temporary_selection_timer.timeout.connect(self._tick_temporary_selection_highlight)
         self.search_highlights: dict[int, list[list[float]]] = {}
         # The laser is anchored to the current explained region. It moves only when
         # the tutor supplies a new focus_page_region tool call, never on a timer.
@@ -240,6 +244,27 @@ class DocumentCanvas(QWidget):
     def clear_ai_focus(self):
         self.ai_focus = None
         self._laser_timer.stop()
+        self.update()
+
+    def set_temporary_selection_highlight(self, page_index: int, normalized_box):
+        """Paint a short yellow navigation flash without creating a PDF annotation."""
+        try:
+            values = [max(0.0, min(1.0, float(v))) for v in normalized_box]
+            if len(values) != 4 or values[2] <= 0 or values[3] <= 0:
+                return
+            values[2] = min(values[2], 1.0 - values[0])
+            values[3] = min(values[3], 1.0 - values[1])
+            self._temporary_selection_highlight = (int(page_index), values, time.monotonic())
+            self._temporary_selection_timer.start()
+            self.update()
+        except Exception:
+            self._temporary_selection_highlight = None
+
+    def _tick_temporary_selection_highlight(self):
+        active = self._temporary_selection_highlight
+        if not active or (time.monotonic() - float(active[2])) >= 1.48:
+            self._temporary_selection_highlight = None
+            self._temporary_selection_timer.stop()
         self.update()
 
     def invalidate_page(self, index: int | None = None):
@@ -871,6 +896,25 @@ class DocumentCanvas(QWidget):
                     painter.drawRoundedRect(hit_rect, 3, 3)
                 except Exception:
                     continue
+            temporary = self._temporary_selection_highlight
+            if temporary and int(temporary[0]) == int(index):
+                try:
+                    elapsed = max(0.0, time.monotonic() - float(temporary[2]))
+                    fade = max(0.0, min(1.0, (1.48 - elapsed) / 0.48)) if elapsed > 1.0 else 1.0
+                    alpha = int(230 * fade)
+                    nx, ny, nw, nh = [float(v) for v in temporary[1]]
+                    flash_rect = QRectF(
+                        rect.left() + nx * rect.width(), rect.top() + ny * rect.height(),
+                        max(5.0, nw * rect.width()), max(5.0, nh * rect.height())
+                    ).intersected(rect)
+                    painter.save()
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                    painter.setPen(QPen(QColor(255, 194, 0, alpha), 2.6))
+                    painter.setBrush(QBrush(QColor(255, 222, 40, int(82 * fade))))
+                    painter.drawRoundedRect(flash_rect, 4, 4)
+                    painter.restore()
+                except Exception:
+                    pass
             focus = self.ai_focus if self.ai_focus_visible else None
             if focus and int(focus[0]) == int(index):
                 try:
@@ -1036,6 +1080,17 @@ class DocumentCanvas(QWidget):
                             for handle in geometry.get("handles", []):
                                 point = handle.get("point", QPointF())
                                 if handle.get("name") == "scale":
+                                    # Fifth, diagonal grip scales both axes equally.
+                                    center = bounds.center()
+                                    vx, vy = point.x() - center.x(), point.y() - center.y()
+                                    rx, ry = max(1.0, bounds.width() / 2.0), max(1.0, bounds.height() / 2.0)
+                                    denom = math.sqrt((vx / rx) ** 2 + (vy / ry) ** 2)
+                                    if denom > 1e-6:
+                                        edge = QPointF(center.x() + vx / denom, center.y() + vy / denom)
+                                        painter.setPen(QPen(QColor("#8eb8ff"), 1.3, Qt.PenStyle.SolidLine))
+                                        painter.drawLine(edge, point)
+                                        painter.setPen(QPen(QColor("#eaf2ff"), 1.0))
+                                        painter.setBrush(QBrush(QColor("#5b9cff")))
                                     painter.save()
                                     painter.translate(point)
                                     painter.rotate(45)
@@ -1480,7 +1535,29 @@ class DocumentCanvas(QWidget):
                     panel.set_document(self.tab.path, Path(self.tab.path).name)
                     if not panel.isVisible():
                         host._animate_ai_panel(True)
-                    QTimer.singleShot(260, lambda p=panel, value=text: p._ask_about_selected_chat_text(value, "document"))
+                    location = None
+                    try:
+                        page = self.tab.doc.load_page(int(page_index))
+                        boxes = [fitz.Rect(word[:4]) for word in records if len(word) >= 5]
+                        if boxes:
+                            union = fitz.Rect(
+                                min(box.x0 for box in boxes), min(box.y0 for box in boxes),
+                                max(box.x1 for box in boxes), max(box.y1 for box in boxes),
+                            )
+                            union = union & page.cropbox
+                            # Word boxes are in unrotated PDF coordinates. Transform
+                            # once to the visible page coordinate system for navigation.
+                            visible_rect = fitz.Rect(union * page.rotation_matrix)
+                            page_rect = page.rect
+                            if page_rect.width > 0 and page_rect.height > 0:
+                                nx = max(0.0, min(1.0, visible_rect.x0 / page_rect.width))
+                                ny = max(0.0, min(1.0, visible_rect.y0 / page_rect.height))
+                                nw = max(0.001, min(1.0 - nx, visible_rect.width / page_rect.width))
+                                nh = max(0.001, min(1.0 - ny, visible_rect.height / page_rect.height))
+                                location = {"path": os.path.abspath(self.tab.path), "page_index": int(page_index), "box": [nx, ny, nw, nh]}
+                    except Exception:
+                        location = None
+                    QTimer.singleShot(260, lambda p=panel, value=text, loc=location: p._ask_about_selected_chat_text(value, "document", loc))
                 except Exception as exc:
                     QMessageBox.warning(self, APP_NAME, str(exc))
 
@@ -1794,17 +1871,16 @@ class DocumentCanvas(QWidget):
             shape_label = str((annot.info or {}).get("content") or "").lower()
             is_point = "pen shape · point" in shape_label or "pen shape - point" in shape_label
             if not is_point:
-                shape_info = dict(annot.info or {})
-                is_pen_circle = (str(shape_info.get("title") or "").strip().lower() == "engo pen shape"
-                                 or "pen shape" in shape_label)
-                if not is_pen_circle:
-                    cx, cy = bounds.center().x(), bounds.center().y()
-                    handles = [
-                        {"name": "p0", "point": QPointF(cx, bounds.top()), "anchor": QPointF(cx, cy), "mode": "circle_axis", "axis": "vertical"},
-                        {"name": "p1", "point": QPointF(bounds.right(), cy), "anchor": QPointF(cx, cy), "mode": "circle_axis", "axis": "horizontal"},
-                        {"name": "p2", "point": QPointF(cx, bounds.bottom()), "anchor": QPointF(cx, cy), "mode": "circle_axis", "axis": "vertical"},
-                        {"name": "p3", "point": QPointF(bounds.left(), cy), "anchor": QPointF(cx, cy), "mode": "circle_axis", "axis": "horizontal"},
-                    ]
+                # Every editable ellipse, including one recognized from a Pen
+                # stroke, gets four axis grips plus the shared diagonal scale grip
+                # added below. This makes a circle freely widen/narrow into an oval.
+                cx, cy = bounds.center().x(), bounds.center().y()
+                handles = [
+                    {"name": "p0", "point": QPointF(cx, bounds.top()), "anchor": QPointF(cx, cy), "mode": "circle_axis", "axis": "vertical"},
+                    {"name": "p1", "point": QPointF(bounds.right(), cy), "anchor": QPointF(cx, cy), "mode": "circle_axis", "axis": "horizontal"},
+                    {"name": "p2", "point": QPointF(cx, bounds.bottom()), "anchor": QPointF(cx, cy), "mode": "circle_axis", "axis": "vertical"},
+                    {"name": "p3", "point": QPointF(bounds.left(), cy), "anchor": QPointF(cx, cy), "mode": "circle_axis", "axis": "horizontal"},
+                ]
         elif subtype == type_highlight and len(raw_vertices) >= 4:
             kind, closed = "highlight", True
             display_vertices = [to_display(point) for point in raw_vertices]

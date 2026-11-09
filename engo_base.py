@@ -825,8 +825,15 @@ class EngoDialogConsistencyFilter(QObject):
         try:
             if event.type() == QEvent.Type.Show:
                 if isinstance(watched, QDialog):
-                    _engo_apply_dialog_consistency(watched)
-                    QTimer.singleShot(0, lambda obj=watched: _engo_apply_dialog_consistency(obj))
+                    # The first-run wizard previews six complete palettes before
+                    # the user commits one. Its own theme-aware stylesheet/palette
+                    # must not be overwritten by the app's not-yet-configured theme.
+                    if not bool(watched.property("engoOwnThemePreview")):
+                        _engo_apply_dialog_consistency(watched)
+                        QTimer.singleShot(0, lambda obj=watched: (
+                            _engo_apply_dialog_consistency(obj)
+                            if not bool(obj.property("engoOwnThemePreview")) else None
+                        ))
                 elif isinstance(watched, QMenu):
                     _engo_apply_menu_consistency(watched)
                     QTimer.singleShot(0, lambda obj=watched: _engo_apply_menu_consistency(obj))
@@ -894,5 +901,51 @@ def is_supported_document(path: str) -> bool:
 
 
 def resource_path(name: str) -> str:
-    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base, name)
+    """Resolve bundled assets in source, PyInstaller, and Nuitka-installed layouts."""
+    asset_name = str(name or "").strip()
+    if not asset_name:
+        return os.path.dirname(os.path.abspath(__file__))
+
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass))
+
+    try:
+        candidates.append(Path(__file__).resolve().parent)
+    except Exception:
+        pass
+    try:
+        executable_dir = Path(sys.argv[0]).resolve().parent
+        candidates.extend((executable_dir, executable_dir / "_internal", executable_dir / "resources"))
+    except Exception:
+        pass
+    try:
+        executable_dir = Path(sys.executable).resolve().parent
+        candidates.extend((executable_dir, executable_dir / "_internal", executable_dir / "resources"))
+    except Exception:
+        pass
+    try:
+        candidates.append(Path.cwd())
+    except Exception:
+        pass
+
+    checked = set()
+    for base in candidates:
+        try:
+            canonical = str(base.resolve())
+            if canonical in checked:
+                continue
+            checked.add(canonical)
+            candidate = base / asset_name
+            if candidate.is_file():
+                return str(candidate)
+        except Exception:
+            continue
+
+    # Preserve the source-tree fallback so callers can still report a useful path
+    # when an optional asset is genuinely missing.
+    try:
+        return str(Path(__file__).resolve().parent / asset_name)
+    except Exception:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), asset_name)
