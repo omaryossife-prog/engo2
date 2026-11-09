@@ -265,6 +265,7 @@ function Invoke-Native {
     $StdoutReader = $null
     $StderrReader = $null
     $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $ExitSeenAt = $null
     $NextHeartbeat = 20
     $NuitkaCompile = ($Label -like '*Compile Engo with Nuitka*')
     $ProgressState = @{ Percent = 3; Stage = 'Starting Nuitka compiler' }
@@ -370,6 +371,14 @@ function Invoke-Native {
                 $TrackedIdsForExit = @($TrackedProcessIds.Keys | ForEach-Object { [int]$_ })
                 $RemainingTreeProcesses = @(Get-Process -Id $TrackedIdsForExit -ErrorAction SilentlyContinue)
                 if ($RemainingTreeProcesses.Count -eq 0) { break }
+                # Helper daemons (mspdbsrv, vctip, compiler-cache server) are meant to stay
+                # alive after Nuitka exits and would make this loop wait forever.
+                # Give real children 120s to finish, then stop waiting.
+                if ($null -eq $ExitSeenAt) { $ExitSeenAt = $Stopwatch.Elapsed.TotalSeconds }
+                if (($Stopwatch.Elapsed.TotalSeconds - $ExitSeenAt) -ge 120) {
+                    Write-LogLine '[BUILD STATUS] Launcher exited; leftover helper processes ignored after 120s grace.'
+                    break
+                }
             }
 
             if ($Stopwatch.Elapsed.TotalSeconds -ge $NextHeartbeat) {
