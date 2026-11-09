@@ -1,0 +1,24 @@
+Engo PDF Viewer v17 — final small UI corrections
+
+1. AI chat close button
+- Kept the outer hit target at 36x34 px.
+- Reduced the X glyph from 19pt to 13pt, regularized its weight, and explicitly centered it.
+
+2. New conversation button
+- Uses the adjacent search button's actual height (30 px), not an independent guessed value.
+- Both controls use the same vertical centering in the session row.
+- Removed internal widget margins from the new-conversation button to avoid a lowered visual baseline.
+
+3. Return to open files
+- Always uses the right-pointing "next" arrow icon.
+- Always places the icon on the right in both Arabic and English.
+- Language changes update the label but no longer change arrow direction or placement.
+
+4. Arabic settings sliders
+- Preserved Arabic inverted numeric travel and the existing endpoint label positions.
+- Swapped only QSlider sub-page/add-page colors for Arabic so the accent fill grows from the opposite side.
+- English slider colors and behavior are unchanged.
+
+5. Dependency pin preserved: google-genai==2.34.0.
+
+Validation: Python syntax compilation and source-level assertions passed. No live PyQt6 visual test was available in this environment.

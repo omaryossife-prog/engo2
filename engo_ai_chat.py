@@ -64,13 +64,35 @@ class AIChatMessageBrowser(QTextBrowser):
         self._selection_scroll_timer.timeout.connect(self._auto_scroll_selection_tick)
         self.ask_selection_btn = QToolButton(self)
         self.ask_selection_btn.setObjectName("chatSelectionAsk")
-        self.ask_selection_btn.setText("اسأل عن المحدد")
-        self.ask_selection_btn.setToolTip("إضافة النص المحدد إلى سؤال جديد في نفس المحادثة")
+        self._interface_language = "en"
+        self.ask_selection_btn.setText("Ask about selection")
+        self.ask_selection_btn.setToolTip("Add selected text to a new question in the same conversation")
         self.ask_selection_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.ask_selection_btn.setFixedHeight(27)
         self.ask_selection_btn.clicked.connect(self._ask_about_selection)
         self.ask_selection_btn.hide()
         self.selectionChanged.connect(lambda: QTimer.singleShot(0, self._update_selection_ask_button))
+
+    def apply_language(self, language=None):
+        """Localize the floating selection action using the active interface language."""
+        value = str(language or self._interface_language or "en").strip().lower()
+        self._interface_language = "ar" if value.startswith("ar") else "en"
+        is_ar = self._interface_language == "ar"
+        self.ask_selection_btn.setText("اسأل عن المحدد" if is_ar else "Ask about selection")
+        self.ask_selection_btn.setToolTip(
+            "إضافة النص المحدد إلى سؤال جديد في نفس المحادثة"
+            if is_ar else
+            "Add selected text to a new question in the same conversation"
+        )
+        self.ask_selection_btn.setLayoutDirection(
+            Qt.LayoutDirection.RightToLeft if is_ar else Qt.LayoutDirection.LeftToRight
+        )
+        if self.ask_selection_btn.isVisible():
+            self.ask_selection_btn.adjustSize()
+            cursor_rect = self.cursorRect(self.textCursor())
+            x = max(6, min(self.width() - self.ask_selection_btn.width() - 8, cursor_rect.left()))
+            y = max(4, cursor_rect.top() - 31)
+            self.ask_selection_btn.move(x, y)
 
     def _ask_about_selection(self):
         selected = str(self.textCursor().selectedText() or "").replace("\u2029", "\n").replace("\u2028", "\n").strip()
@@ -79,6 +101,18 @@ class AIChatMessageBrowser(QTextBrowser):
             self.selectionQuestionRequested.emit(selected)
 
     def _update_selection_ask_button(self):
+        # Bubbles may be created after the chat panel's last language-change pass.
+        # Resolve the live language from the owning MainWindow whenever a selection
+        # action is shown, so newly rendered/cached transcript pages are localized too.
+        try:
+            owner_settings = getattr(self.window(), "settings", None)
+            if owner_settings is not None:
+                current_language = owner_settings.value("interface_language", "en", type=str)
+                normalized_language = "ar" if str(current_language or "en").lower().startswith("ar") else "en"
+                if normalized_language != self._interface_language:
+                    self.apply_language(normalized_language)
+        except (RuntimeError, AttributeError, TypeError):
+            pass
         selected = str(self.textCursor().selectedText() or "").strip()
         if not selected:
             self.ask_selection_btn.hide()
@@ -651,7 +685,10 @@ class AIChatPanel(QFrame):
         self._chat_font_pt = max(8.0, min(24.0, settings.value("ui_chat_font_pt", 13, type=float)))
         self._typing_font_pt = max(8.0, min(24.0, settings.value("ui_typing_font_pt", 12, type=float)))
         self.setObjectName("aiPanel")
-        self.setMinimumWidth(405)
+        # Allow the chat dock to become narrower; the provider/model selectors
+        # below use ignored horizontal size hints so they can contract instead
+        # of forcing the controls row to overlap.
+        self.setMinimumWidth(330)
         self.setMaximumWidth(720)
         self.document_path = ""
         self.document_name = "No PDF open"
@@ -697,6 +734,11 @@ class AIChatPanel(QFrame):
                 language = "en"
         is_ar = str(language or "en").lower().startswith("ar")
         busy = bool(getattr(self, "_busy", False))
+        for message_browser in self.findChildren(AIChatMessageBrowser):
+            try:
+                message_browser.apply_language("ar" if is_ar else "en")
+            except RuntimeError:
+                pass
         button = getattr(self, "send_btn", None)
         if button is not None:
             if busy:
@@ -911,12 +953,16 @@ class AIChatPanel(QFrame):
         header.addLayout(name_box, 1)
         self.pdf_actions_btn = QPushButton("PDF actions ▾")
         self.pdf_actions_btn.setObjectName("aiPdfActions")
+        self.pdf_actions_btn.setFixedHeight(34)
+        self.pdf_actions_btn.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.pdf_actions_btn.setIcon(make_icon("summarize", "#9ebcff", 15))
         self.pdf_actions_btn.setToolTip("Summarize/review the whole PDF or ask about the current page")
         self.pdf_actions_btn.clicked.connect(self._show_pdf_actions_menu)
         header.addWidget(self.pdf_actions_btn)
         self.export_btn = QPushButton("Export")
         self.export_btn.setObjectName("aiExport")
+        self.export_btn.setFixedHeight(34)
+        self.export_btn.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.export_btn.setIcon(make_icon("export", "#b7c6dc", 15))
         self.export_btn.setToolTip("Export this conversation as Markdown or a formatted PDF report")
         self.export_btn.clicked.connect(self._export_menu)
@@ -924,7 +970,7 @@ class AIChatPanel(QFrame):
         self.focus_mode_btn = MotionButton(parent=self)
         self.focus_mode_btn.setObjectName("aiFocusMode")
         self.focus_mode_btn.setIcon(make_icon("fullscreen", "#b7c6dc", 16))
-        self.focus_mode_btn.setFixedSize(32, 29)
+        self.focus_mode_btn.setFixedSize(32, 34)
         self.focus_mode_btn.setToolTip("Expand chat · hide the PDF and app controls (Ctrl+Shift+F)")
         self.focus_mode_btn.setAccessibleName("Enter chat focus mode")
         self.focus_mode_btn.clicked.connect(lambda _checked=False: self.main_window.toggle_chat_focus_mode())
@@ -932,6 +978,8 @@ class AIChatPanel(QFrame):
         self.close_panel_btn = QPushButton("×")
         self.close_panel_btn.setObjectName("aiClosePanel")
         self.close_panel_btn.setFixedSize(36, 34)
+        self.close_panel_btn.setContentsMargins(0, 0, 0, 0)
+        self.close_panel_btn.setStyleSheet("text-align:center; padding:0px;")
         self.close_panel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.close_panel_btn.setToolTip("Close AI chat")
         self.close_panel_btn.setAccessibleName("Close AI chat panel")
@@ -956,15 +1004,29 @@ class AIChatPanel(QFrame):
         self.chat_search_btn = QPushButton()
         self.chat_search_btn.setObjectName("aiChatSearch")
         self.chat_search_btn.setIcon(make_icon("search", "#aebfda", 15))
+        # Both session-row action buttons share the exact same outer height.
+        # The search button keeps its compact square width; the new-chat button
+        # keeps a text-driven width but uses the same fixed 30 px height.
         self.chat_search_btn.setFixedSize(32, 30)
+        self.chat_search_btn.setMinimumHeight(30)
+        self.chat_search_btn.setMaximumHeight(30)
+        self.chat_search_btn.setContentsMargins(0, 0, 0, 0)
         self.chat_search_btn.setToolTip("Search inside this conversation")
         self.chat_search_btn.clicked.connect(self._toggle_chat_search)
-        chat_session_row.addWidget(self.chat_search_btn)
+        chat_session_row.addWidget(self.chat_search_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         self.new_chat_btn = QPushButton("+ New chat")
         self.new_chat_btn.setObjectName("aiNewChat")
+        # Match the search control's outer geometry explicitly. Do not derive
+        # the height from a pre-show QWidget geometry, which can vary before
+        # polish/layout on some Qt styles and make this button look taller.
+        self.new_chat_btn.setFixedHeight(30)
+        self.new_chat_btn.setMinimumHeight(30)
+        self.new_chat_btn.setMaximumHeight(30)
+        self.new_chat_btn.setContentsMargins(0, 0, 0, 0)
+        self.new_chat_btn.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.new_chat_btn.setToolTip("Start a new saved conversation for this PDF")
         self.new_chat_btn.clicked.connect(self._new_conversation)
-        chat_session_row.addWidget(self.new_chat_btn)
+        chat_session_row.addWidget(self.new_chat_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(self.chat_session_container)
 
         self.chat_search_row = QWidget()
@@ -1002,7 +1064,10 @@ class AIChatPanel(QFrame):
         self.document_label.setWordWrap(False)
         self.document_label.setMaximumHeight(25)
         self.document_label.setToolTip("The current PDF provides context to questions when enabled")
-        layout.addWidget(self.document_label)
+        # The selected conversation name is already visible in chat_combo.
+        # Keep this context label alive for compatibility with existing update
+        # code, but do not show the redundant strip beneath the conversation row.
+        self.document_label.hide()
 
         # Conversation gets almost all available vertical space.
         self.transcript = QScrollArea()
@@ -1133,8 +1198,9 @@ class AIChatPanel(QFrame):
 
         self.provider_combo = QComboBox()
         self.provider_combo.setObjectName("aiProviderSelector")
-        self.provider_combo.setMinimumWidth(112)
+        self.provider_combo.setMinimumWidth(0)
         self.provider_combo.setMaximumWidth(155)
+        self.provider_combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         for provider, label in AI_PROVIDER_LABELS.items():
             self.provider_combo.addItem(label, provider)
         preferred = self.settings.value("ai_provider", "deepseek", type=str)
@@ -1142,18 +1208,22 @@ class AIChatPanel(QFrame):
         self.provider_combo.setCurrentIndex(pref_index)
         self.provider_combo.currentIndexChanged.connect(self._provider_changed)
         self.provider_combo.setToolTip("Choose which AI service receives your question")
-        controls.addWidget(self.provider_combo)
+        controls.addWidget(self.provider_combo, 2)
 
         self.model_combo = QComboBox()
         self.model_combo.setObjectName("aiModelSelector")
         self.model_combo.setEditable(True)
         self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.model_combo.setMinimumWidth(142)
+        self.model_combo.setMinimumWidth(0)
         self.model_combo.setMaximumWidth(225)
+        self.model_combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.model_combo.setMinimumContentsLength(1)
+        if self.model_combo.lineEdit() is not None:
+            self.model_combo.lineEdit().setMinimumWidth(0)
+            self.model_combo.lineEdit().setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.model_combo.setToolTip("Choose the model for this chat. Refresh available models in AI provider settings.")
         self.model_combo.currentTextChanged.connect(self._chat_model_changed)
-        controls.addWidget(self.model_combo)
-        controls.addStretch(1)
+        controls.addWidget(self.model_combo, 3)
 
         self.include_context = QCheckBox("PDF context")
         self.include_context.setChecked(True)

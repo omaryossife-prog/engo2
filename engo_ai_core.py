@@ -1119,14 +1119,10 @@ class ProviderModelsWorker(QThread):
 
 
 class _AINoWheelComboBox(QComboBox):
-    """Prevent accidental setting changes while the AI settings page scrolls.
-
-    The mouse wheel must scroll the containing QScrollArea, not cycle through
-    provider/model/language choices merely because the pointer rests over a
-    dropdown. Clicking to open the list and deliberate keyboard navigation
-    continue to work normally, matching AppSettingsDialog behavior.
-    """
+    """Prevent accidental setting changes while the AI settings page scrolls."""
     def wheelEvent(self, event):
+        # Ignore wheel changes on the combo itself so the containing scroll area
+        # receives the wheel and deliberate click/keyboard selection stays intact.
         event.ignore()
 
 
@@ -1246,27 +1242,23 @@ class AISettingsDialog(QDialog):
         live_layout.addWidget(live_label)
         live_row = QHBoxLayout()
         live_row.addWidget(QLabel("Live model"))
-        live_combo = _AINoWheelComboBox()
-        live_combo.setEditable(True)
-        live_combo.setMinimumWidth(360)
-        live_combo.setToolTip("Model ID for native, bidirectional Gemini Live voice sessions")
-        live_combo.addItem("Gemini 3.8 Live · realtime audio", "gemini-3.8-live")
-        live_combo.addItem("Gemini 3.8 Live · extended thinking", "gemini-3.8-live-extended-thinking")
-        saved_live = str(self.settings.value("ai_model_gemini_live", "gemini-3.8-live", type=str) or "gemini-3.8-live")
-        if saved_live == "gemini-live-2.5-flash-native-audio":
-            saved_live = "gemini-3.8-live"
-        live_index = live_combo.findData(saved_live)
-        if live_index >= 0:
-            live_combo.setCurrentIndex(live_index)
-        else:
-            live_combo.setEditText(saved_live)
-        live_row.addWidget(live_combo, 1)
+        # Gemini Live is intentionally fixed to the fast realtime-audio model.
+        # Keeping this as a read-only label prevents obsolete/unsupported thinking
+        # variants saved by older builds from being selected again.
+        live_model_label = QLabel("Gemini 3.8 Live · realtime audio")
+        live_model_label.setObjectName("aiSettingsFixedValue")
+        live_model_label.setMinimumWidth(360)
+        live_model_label.setToolTip("Fixed model for fast, bidirectional Gemini Live voice sessions")
+        live_model_label.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        live_model_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        live_row.addWidget(live_model_label, 1)
         live_layout.addLayout(live_row)
+        self.settings.setValue("ai_model_gemini_live", "gemini-3.8-live")
         live_hint = QLabel("The Voice & Learn window uses Gemini Live in push-to-talk mode: hold Space only while speaking. API access and billing depend on your Google AI account.")
         live_hint.setObjectName("dialogHint")
         live_hint.setWordWrap(True)
         live_layout.addWidget(live_hint)
-        self.live_model_combo = live_combo
+        self.live_model_label = live_model_label
         form.addWidget(live_group)
 
         # Translation preferences live here; text and handwriting are translated by Google Gemini.
@@ -1509,7 +1501,6 @@ class AISettingsDialog(QDialog):
             "Chinese (Simplified)": "الصينية (المبسطة)", "Japanese": "اليابانية", "Arabic (Egypt)": "العربية (مصر)",
             "English (US)": "الإنجليزية (الولايات المتحدة)",
             "Gemini 3.8 Live · realtime audio": "Gemini 3.8 Live · صوت فوري",
-            "Gemini 3.8 Live · extended thinking": "Gemini 3.8 Live · تفكير موسّع",
         }
         if text in exact:
             return exact[text]
@@ -1593,11 +1584,8 @@ class AISettingsDialog(QDialog):
             except RuntimeError:
                 pass
         try:
-            self.live_model_combo.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
-            live_edit = self.live_model_combo.lineEdit()
-            if live_edit is not None:
-                live_edit.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
-                live_edit.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self.live_model_label.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+            self.live_model_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         except (RuntimeError, AttributeError):
             pass
         # Status labels are refreshed from their source state after language changes.
@@ -1665,12 +1653,7 @@ class AISettingsDialog(QDialog):
             if not _save_provider_key(self.settings, provider, key):
                 secure_all = False
             # Model choice belongs to the current chat composer, not provider settings.
-        live_combo = self.live_model_combo
-        if live_combo.currentIndex() >= 0 and live_combo.currentText() == live_combo.itemText(live_combo.currentIndex()):
-            live_model = str(live_combo.currentData() or "gemini-3.8-live")
-        else:
-            live_model = live_combo.currentText().strip() or "gemini-3.8-live"
-        self.settings.setValue("ai_model_gemini_live", live_model)
+        self.settings.setValue("ai_model_gemini_live", "gemini-3.8-live")
         self.settings.setValue("translate_source", str(self.lang_controls["source"].currentData() or "auto"))
         self.settings.setValue("translate_target", str(self.lang_controls["target"].currentData() or "ar"))
         self.settings.setValue("voice_input_language", str(self.lang_controls["voice"].currentData() or "ar-EG"))

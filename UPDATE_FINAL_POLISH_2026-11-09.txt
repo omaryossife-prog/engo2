@@ -1,0 +1,14 @@
+Engo PDF Viewer v17 — final polish before release
+
+Changes:
+1. Return-to-open-files arrow is fixed to one visual direction in Arabic and English.
+2. Settings slider accent always fills the minimum-to-handle segment, so larger fill corresponds to a larger value in both languages.
+3. The floating “Ask about selection” action follows the interface language.
+4. Bottom helper hints now append the Insert translation shortcut and double-Space chat shortcut.
+5. Chat header controls share a consistent 34 px height; the close X glyph is larger.
+6. Gemini Live is fixed to Gemini 3.8 Live · realtime audio; the extended-thinking choice is removed and legacy saved values are normalized.
+7. AI settings dropdowns ignore mouse-wheel changes so scrolling cannot alter settings accidentally.
+8. The Arabic AI settings row action label is exactly “Ai فتح اعدادات”.
+9. google-genai is pinned to 2.34.0 to match the tested source/build environments.
+
+No EXE is included. Rebuild on Windows using the existing build script.

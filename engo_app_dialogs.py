@@ -965,14 +965,14 @@ class AppSettingsDialog(QDialog):
             slider_line.setDirection(QBoxLayout.Direction.LeftToRight)
             slider = _SettingsNoWheelSlider(Qt.Orientation.Horizontal, control)
             slider.setObjectName("settingsSlider")
-            # Keep the slider's physical layout left-to-right in every language,
-            # with a normal, non-inverted value direction: the minimum sits on
-            # the physical left and the maximum on the physical right, exactly
-            # where the handle actually travels. This keeps the printed low/high
-            # labels and the live value readout in sync with the handle's real
-            # position, instead of appearing to read backwards.
+            # Keep the slider widget and the fixed endpoint labels in their
+            # existing physical positions. Only invert the slider's visual/value
+            # travel for Arabic: the accent then starts at the RIGHT and grows
+            # toward the LEFT as the selected value increases. English remains
+            # the normal left-to-right progression. The endpoint labels below
+            # are deliberately not reordered or moved.
             slider.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
-            slider.setInvertedAppearance(False)
+            slider.setInvertedAppearance(is_ar)
             slider.setInvertedControls(False)
             slider.setRange(0, max(0, len(values) - 1))
             slider.setSingleStep(1)
@@ -995,16 +995,13 @@ class AppSettingsDialog(QDialog):
             endpoints.setContentsMargins(2, 0, 2, 0)
             endpoints.setSpacing(4)
             endpoints.setDirection(QBoxLayout.Direction.LeftToRight)
-            # Plain left-to-right scale labels that match the slider's real,
-            # non-inverted travel: lowest value on the physical left, where the
-            # handle sits at minimum, and highest value on the physical right,
-            # where the handle sits at maximum.
+            # Keep endpoint labels in their original physical positions; they
+            # are not reordered when the Arabic accent-page colors are swapped.
             high_label = QLabel(str(high_text if high_text is not None else values[-1]) + suffix)
             low_label = QLabel(str(low_text if low_text is not None else values[0]) + suffix)
             for endpoint in (low_label, high_label):
                 endpoint.setObjectName("settingsSliderRangeLabel")
-            # Physical order is LTR: low/minimum on the left, high/maximum on
-            # the right, matching invertedAppearance=False.
+            # Physical order intentionally remains unchanged in both languages.
             endpoints.addWidget(low_label)
             endpoints.addStretch(1)
             endpoints.addWidget(high_label)
@@ -1319,11 +1316,13 @@ class AppSettingsDialog(QDialog):
 
     @staticmethod
     def _build_theme_stylesheet(c, language="en"):
-        # In English, the accent fill grows from the physical left toward the
-        # handle (LTR). Keep the existing Arabic fill direction unchanged.
-        is_english = str(language).strip().lower() != "ar"
-        slider_sub_page = c["accent"] if is_english else c["border"]
-        slider_add_page = c["border"] if is_english else c["accent"]
+        is_ar = str(language).lower().startswith("ar")
+        # Arabic keeps the slider's already-correct right-to-left numeric travel,
+        # but the accent segment is painted on the opposite Qt page portion.
+        # Swap only the two page colors: values, handle travel, and the fixed
+        # endpoint labels remain untouched.
+        slider_sub_page = c["border"] if is_ar else c["accent"]
+        slider_add_page = c["accent"] if is_ar else c["border"]
         return f"""
             QDialog#appSettingsDialog {{ background: {c['bg']}; color: {c['text']}; }}
             QDialog#appSettingsDialog QLabel {{ background: transparent; color: {c['text']}; }}

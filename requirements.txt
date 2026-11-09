@@ -4,7 +4,7 @@ Pillow>=10.0
 keyring>=25.0
 pytesseract>=0.3.10
 SpeechRecognition>=3.10
-google-genai>=1.0.0
+google-genai==2.34.0
 sounddevice>=0.5.0
 Markdown>=3.6
 matplotlib>=3.8

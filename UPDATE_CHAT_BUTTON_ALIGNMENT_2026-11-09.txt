@@ -1,0 +1,8 @@
+Engo PDF Viewer v17 — Chat control alignment polish
+
+1. Reduced only the close glyph size from 24pt to 19pt and eased its weight from 900 to 800. The close button remains 36x34 px.
+2. Kept the New Chat button at its original 30 px outer height (same as the conversation search button). Removed vertical-only stylesheet padding in light and dark themes so the label is centered and no longer appears lowered. Horizontal padding remains 8 px.
+3. Explicitly vertically centered New Chat in the session row.
+4. Preserved google-genai==2.34.0 in requirements.txt from the previous pre-build fixes.
+
+Validation: Python syntax compilation passed for main.py and engo_ai_chat.py. ZIP integrity checked. No live PyQt6 visual test was available in this environment.

@@ -1,0 +1,15 @@
+Engo v17 — arrow placement and Arabic settings slider direction
+
+1. Return-to-open-files arrow
+- The arrow icon artwork is not mirrored or replaced between languages.
+- Arabic: icon is placed on the right side of the label.
+- English: icon is placed on the left side of the label.
+- The behavior is applied both during initial UI creation and language changes.
+
+2. Settings sliders (interface scale and font sizes)
+- English: normal left-to-right progression.
+- Arabic: visual slider progression is inverted, so the accent begins on the
+  right and grows toward the left as the numeric value increases.
+- The slider widget layout stays left-to-right, and the fixed endpoint labels
+  are not reordered or repositioned.
+- The stored values, ranges, and settings keys are unchanged.

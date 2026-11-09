@@ -1,0 +1,10 @@
+Engo PDF Viewer v17 — Chat layout polish
+
+1. PDF actions and Export buttons share an explicit 34 px height.
+2. New chat and conversation search buttons share an explicit 30 px height.
+3. Removed the redundant PDF-context/document-name strip under the saved-conversation selector. The label object remains hidden for compatibility with current update paths.
+4. Reduced the chat panel minimum width so the panel can contract on narrow layouts.
+5. Provider and model selectors now use ignored horizontal size hints, zero minimum width, and proportional layout stretch (2:3), preventing them from forcing overlap when the chat panel is narrow.
+6. The editable model field is also allowed to contract with the model selector.
+
+Validation: Python syntax compilation and static layout assertions passed. A live PyQt6 resize test was not run in this environment.

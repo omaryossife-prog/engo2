@@ -1,0 +1,8 @@
+Engo PDF Viewer v17 — chat session button height correction
+
+- Search action remains 32x30 px.
+- New conversation action keeps its natural text width and now has a strict 30 px fixed/min/max height.
+- Both controls use matching vertical padding and margin constraints in the shared theme stylesheet, across light and dark themes.
+- The row still vertically centers both controls. No width was forced on the new-conversation button.
+
+Validation: Python syntax check and ZIP integrity check performed. No live PyQt6 visual test was available in this environment.

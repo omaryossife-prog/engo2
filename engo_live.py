@@ -2578,27 +2578,6 @@ class LiveTutorDialog(QDialog):
         self.set_page_navigation(1, 1)
         self._apply_window_theme(True)
 
-    def _set_start_button_caption(self, is_ar: bool | None = None):
-        """Keep the full-page lesson button caption localized in every state."""
-        if is_ar is None:
-            try:
-                settings = getattr(self.parent(), "settings", None)
-                language = str(settings.value("interface_language", "en", type=str) if settings is not None else "en")
-                is_ar = language.lower().startswith("ar")
-            except Exception:
-                is_ar = False
-
-        if self._session_active:
-            caption = "الشرح جارٍ" if is_ar else "Conversation active"
-            tooltip = "الحصة الصوتية نشطة حاليًا" if is_ar else "The live lesson is currently active"
-        else:
-            caption = "ابدأ شرح الصفحة بالكامل" if is_ar else "Start full-page lesson"
-            tooltip = "ابدأ حصة صوتية لشرح الصفحة الحالية بالكامل" if is_ar else "Start one live lesson for the current PDF page"
-
-        self.start_btn.setText(caption)
-        self.start_btn.setToolTip(tooltip)
-        self.start_btn.setAccessibleName(caption)
-
     def _apply_window_theme(self, enabled: bool = True):
         """Apply the exact application palette to the live lesson and its child editor."""
         parent = self.parent()
@@ -2628,7 +2607,6 @@ class LiveTutorDialog(QDialog):
         combo_chevron_asset = "combo_chevron_light.png" if theme_name == "light" else "combo_chevron_dark.png"
         combo_chevron_path = resource_path(combo_chevron_asset).replace("\\", "/")
         dialog_title = "حصة صوتية مع AI" if is_ar else "Audio lesson with AI"
-        self._set_start_button_caption(is_ar)
         self.setWindowTitle(dialog_title)
         self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
         self.teacher_preferences_dialog.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
@@ -3563,7 +3541,7 @@ class LiveTutorDialog(QDialog):
         self._session_active = bool(active)
         self._tutor_paused = bool(paused) if active else False
         self.start_btn.setEnabled(not active)
-        self._set_start_button_caption()
+        self.start_btn.setText("Conversation active" if active else "Start full-page lesson")
         self.stop_btn.setEnabled(active)
         self.refresh_btn.setEnabled(True)
         self.ptt_btn.setEnabled(bool(active and not self._tutor_paused))

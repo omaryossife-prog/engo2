@@ -823,9 +823,10 @@ class MainWindow(QMainWindow):
         self.return_to_docs_btn.setFixedHeight(30)
         self.return_to_docs_btn.setProperty("homeActionHeight", True)
         self.return_to_docs_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.return_to_docs_btn.setIcon(make_icon("previous", "#b7c6dc", 16))
+        # The return control always keeps a right-pointing arrow on the right,
+        # regardless of the current interface language.
+        self.return_to_docs_btn.setIcon(make_icon("next", "#b7c6dc", 16))
         self.return_to_docs_btn.setIconSize(QSize(16, 16))
-        # Keep the return arrow on the RIGHT side of the label in both UI languages.
         self.return_to_docs_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self.return_to_docs_btn.setToolTip("Return to open PDFs")
         self.return_to_docs_btn.setAccessibleName("Return to open PDFs")
@@ -1943,7 +1944,7 @@ class MainWindow(QMainWindow):
             }
             QPushButton#aiNewChat {
                 background:#edf3fb; color:#28528d; border:1px solid #c4d2e5;
-                border-radius:7px; padding:5px 8px;
+                border-radius:7px; padding:0px 8px;
             }
             QPushButton#aiNewChat:hover { background:#e1ebf8; border-color:#a7bddb; }
             QComboBox#aiProviderSelector, QComboBox#aiModelSelector {
@@ -2006,7 +2007,7 @@ class MainWindow(QMainWindow):
             QPushButton#aiClosePanel:hover, QPushButton#aiChatSearch:hover {
                 background:#e8eff9; color:#203957; border-color:#8fa9ce;
             }
-            QPushButton#aiClosePanel { font-size:20pt; font-weight:900; padding:0px; }
+            QPushButton#aiClosePanel { font-size:13pt; font-weight:700; padding:0px; text-align:center; }
             QPushButton#aiPdfActions:pressed, QPushButton#aiExport:pressed, QPushButton#aiFocusMode:pressed,
             QPushButton#aiClosePanel:pressed, QPushButton#aiChatSearch:pressed {
                 background:#dbe7f6; border-color:#7d9bc6;
@@ -2598,8 +2599,9 @@ class MainWindow(QMainWindow):
             self.open_btn.setText("الرئيسية" if language == "ar" else "Home")
         if hasattr(self, "return_to_docs_btn"):
             self.return_to_docs_btn.setText("العودة إلى الملفات المفتوحة" if language == "ar" else "Return to open files")
-            self.return_to_docs_btn.setIcon(make_icon("next" if language == "ar" else "previous", "#b7c6dc", 16))
-            # QPushButton places its icon after the text in RTL layout direction.
+            # Both languages use the same right-pointing arrow, always placed
+            # on the right side of the button label.
+            self.return_to_docs_btn.setIcon(make_icon("next", "#b7c6dc", 16))
             self.return_to_docs_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
             tip = "العودة إلى ملفات PDF المفتوحة" if language == "ar" else "Return to open PDFs"
             self.return_to_docs_btn.setToolTip(tip)
@@ -3385,7 +3387,7 @@ class MainWindow(QMainWindow):
         QPushButton#aiAddImage {{ background: #2a3444; border: 1px solid #455a78; border-radius: 8px; color: #d6e6ff; font-size: 19pt; font-weight: 400; padding: 0; }}
         QPushButton#aiAddImage:hover {{ background: #354b6b; border-color: #7196ce; }}
         QComboBox#aiChatSelector, QComboBox#translateTarget {{ background: #151a22; border: 1px solid #364357; border-radius: 7px; padding: 5px 7px; color: #e4ebf8; }}
-        QPushButton#aiNewChat {{ background: #283549; border: 1px solid #415979; border-radius: 7px; padding: 5px 8px; color: #dce9ff; }}
+        QPushButton#aiNewChat {{ background: #283549; border: 1px solid #415979; border-radius: 7px; padding: 0px 8px; color: #dce9ff; }}
         QPushButton#aiNewChat:hover {{ background: #344968; border-color: #6688b9; }}
         QComboBox#aiProviderSelector, QComboBox#aiModelSelector, QComboBox#aiLanguageSelector {{
             background:#151a22; border:1px solid #364357; border-radius:7px;
@@ -3584,6 +3586,12 @@ class MainWindow(QMainWindow):
         QPushButton#homeNav:pressed, QPushButton#homeSettingsNav:pressed {{ background:{t['pressed']}; }}
         QPushButton, QToolButton {{ background:{t['raised']}; color:{t['text']}; border-color:{t['border']}; }}
         QPushButton:hover, QToolButton:hover {{ background:{t['hover']}; border-color:{t['border_strong']}; }}
+        /* Keep the chat-session action controls visually level in every theme. */
+        QPushButton#aiNewChat, QPushButton#aiChatSearch {{
+            min-height:30px; max-height:30px; padding-top:0px; padding-bottom:0px;
+            margin-top:0px; margin-bottom:0px; border-width:1px;
+        }}
+        QPushButton#aiClosePanel {{ font-size:13pt; font-weight:700; padding:0px; text-align:center; }}
         QPushButton:pressed, QToolButton:pressed {{ background:{t['pressed']}; }}
         QPushButton:disabled, QToolButton:disabled {{ color:{t['muted']}; background:{t['panel_alt']}; border-color:{t['border']}; }}
         QPushButton#primary, QPushButton#filesPrimaryButton, QPushButton#aiSend {{
@@ -6737,7 +6745,7 @@ class MainWindow(QMainWindow):
                 "Voice & Learn requires a Google Gemini API key with access to Gemini Live.\n\n"
                 "Open Application Settings → AI settings → Google Gemini → API key, save it, then start the conversation again.")
             return
-        model = str(self.settings.value("ai_model_gemini_live", "gemini-3.8-live", type=str) or "gemini-3.8-live")
+        model = "gemini-3.8-live"  # Fixed fast realtime-audio model; no extended-thinking mode.
         try:
             page_text, page_image, page_index = self._capture_live_page(tab.path, tab.current_page)
         except Exception as exc:
@@ -9056,9 +9064,9 @@ class MainWindow(QMainWindow):
             "delete_btn": ("احذف التعليق أو العنصر المحدد من الصفحة.", "Delete the selected annotation or item from the page."),
             "annot_colors_btn": ("اختر لون القلم والتظليل والملاحظات ومربع النص.", "Choose colors for the pen, highlights, notes, and text boxes."),
             "theme_btn": ("غيّر ألوان عرض صفحة PDF دون تعديل ألوان واجهة Engo.", "Change the PDF page viewing colors without changing Engo's interface theme."),
-            "ai_chat_btn": ("افتح المحادثة النصية لطرح الأسئلة وتلخيص الملف وشرح محتواه.", "Open text chat to ask questions, summarize the PDF, and explain its contents."),
+            "ai_chat_btn": ("افتح المحادثة النصية لطرح الأسئلة وتلخيص الملف وشرح محتواه. اضغط Space مرتين لفتح المحادثة النصية.", "Open text chat to ask questions, summarize the PDF, and explain its contents. Press Space twice to open text chat."),
             "live_tutor_btn": ("ابدأ حصة صوتية يشرح فيها Engo محتوى الصفحة خطوة بخطوة.", "Start a live spoken lesson where Engo teaches the page step by step."),
-            "translate_btn": ("حدد منطقة في الصفحة لترجمتها داخل نافذة ترجمة.", "Select an area on the page to translate it in a translation card."),
+            "translate_btn": ("حدد منطقة في الصفحة لترجمتها داخل نافذة ترجمة. استخدم Insert لتحديد المنطقة المراد ترجمتها.", "Select an area on the page to translate it in a translation card. Press Insert to start selecting an area for translation."),
             "present_btn": ("اعرض الصفحة في وضع تقديم خالٍ من المشتتات.", "Show the page in a distraction-free presentation mode."),
             "full_btn": ("اعرض Engo بملء الشاشة. اضغط F11 للعودة.", "Use Engo in full-screen mode. Press F11 to return."),
             "toolbar_pin_btn": ("ثبّت شريط الأدوات أو اسمح له بالاختفاء تلقائيًا.", "Pin the toolbar or allow it to hide automatically."),
